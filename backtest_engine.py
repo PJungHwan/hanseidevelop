@@ -4,48 +4,59 @@ import vectorbt as vbt
 import pandas_ta as ta
 from indicators import add_indicators
 
-def run_advanced_backtest(csv_path="BTC_USDT_1h.csv"):
+def run_advanced_backtest(csv_1h="BTC_USDT_1h.csv", csv_4h="BTC_USDT_4h.csv"):
     """
-    시장 변동성에 맞춘 동적 레버리지와 TP/SL(익절/손절)이 결합된 고도화 엔진입니다.
+    1시간봉 시그널과 4시간봉 추세를 융합한 멀티 타임프레임(MTF) 백테스트 엔진입니다.
     """
-    print(f"🚀 [{csv_path}] 동적 레버리지 및 리스크 관리 시스템 가동...\n")
+    print(f"🚀 멀티 타임프레임(1h + 4h) 융합 엔진 구동 중...\n")
     
-    df = add_indicators(csv_path)
+    # 1. 두 개의 타임프레임 데이터 각각 불러오기
+    df_1h = add_indicators(csv_1h)
+    df_4h = add_indicators(csv_4h)
     
-    # 1. 시장 변동성 측정을 위한 ATR(Average True Range) 지표 추가
-    df['ATR'] = ta.atr(df['high'], df['low'], df['close'], length=14)
-    df.dropna(inplace=True) # 새로 생긴 빈칸 제거
+    # 2. [핵심] 4시간봉 거시적 추세 판별 (4시간봉 종가가 20 이평선 위에 있으면 상승장)
+    df_4h['Trend_4h_Bullish'] = df_4h['close'] > df_4h['SMA_20']
     
-    # 2. 매수/매도 시그널 (Golden Cross / RSI 과매수)
-    entries = (df['close'] > df['AVWAP_Weekly']) & (df['close'].shift(1) <= df['AVWAP_Weekly'].shift(1))
-    exits = df['RSI_14'] >= 70
+    # 3. 미래 참조(Lookahead Bias) 오류를 방지하며 4시간봉 결과를 1시간봉 시간에 맞춰 병합
+    # ffill(Forward Fill): 새로운 4시간봉 캔들이 완성되기 전까지는 이전 상태를 유지
+    df_1h['Trend_4h_Bullish'] = df_4h['Trend_4h_Bullish'].reindex(df_1h.index, method='ffill')
     
-    # 3. [핵심] 변동성 기반 동적 레버리지(Dynamic Leverage) 비율 계산
-    # 현재 가격 대비 변동성(ATR)의 비율을 구함
-    atr_pct = df['ATR'] / df['close']
+    # 4. 변동성 지표(ATR) 추가
+    df_1h['ATR'] = ta.atr(df_1h['high'], df_1h['low'], df_1h['close'], length=14)
+    df_1h.dropna(inplace=True) 
     
-    # 변동성이 높으면 레버리지를 줄이고, 낮으면 레버리지를 늘리는 탄력적 유연 로직
-    # np.clip을 사용해 최소 1배수 ~ 최대 10배수 사이로 제한
-    dynamic_leverage = np.clip(0.02 / atr_pct, 1.0, 10.0) 
-    
-    # 4. Vectorbt 포트폴리오 가동 (자본금 10,000 USDT 기준)
-    pf = vbt.Portfolio.from_signals(
-        close=df['close'],
-        entries=entries,
-        exits=exits,
-        size=dynamic_leverage,     # 실시간으로 계산된 동적 레버리지 배율을 투자 비중으로 적용
-        size_type='percent',       # 자본금 대비 비율로 해석 (예: 2.0 = 2배수 레버리지)
-        sl_stop=0.05,              # 5% 하락 시 기계적 손절(Stop Loss)
-        tp_stop=0.15,              # 15% 상승 시 자동 익절(Take Profit)
-        init_cash=10000,
-        fees=0.0005,               # 바이낸스 시장가 수수료
-        freq='1h' 
+    # 5. [진입 조건 심화] 1시간봉 AVWAP 상향 돌파 AND 4시간봉 전체 추세가 상승장일 때만 매수
+    entries = (
+        (df_1h['close'] > df_1h['AVWAP_Weekly']) & 
+        (df_1h['close'].shift(1) <= df_1h['AVWAP_Weekly'].shift(1)) & 
+        (df_1h['Trend_4h_Bullish'] == True)
     )
     
-    print("\n📊 [고도화된 백테스트 성과 요약 리포트]")
+    # [매도 조건] RSI 70 이상 과매수 구간 진입 시
+    exits = df_1h['RSI_14'] >= 70
+    
+    # 6. 동적 레버리지 계산 (이전 단계 유지)
+    atr_pct = df_1h['ATR'] / df_1h['close']
+    dynamic_leverage = np.clip(0.02 / atr_pct, 1.0, 10.0)
+    
+    # 7. Vectorbt 포트폴리오 가동
+    pf = vbt.Portfolio.from_signals(
+        close=df_1h['close'],
+        entries=entries,
+        exits=exits,
+        size=dynamic_leverage,
+        size_type='percent',
+        sl_stop=0.05,  # 5% 고정 손절 (다음 16단계에서 트레일링 스탑으로 교체 예정)
+        tp_stop=0.15,
+        init_cash=10000,
+        fees=0.0005,
+        freq='1h'
+    )
+    
+    print("\n📊 [15단계 MTF 최적화 성과 리포트]")
     print(pf.stats())
     
     return pf
 
 if __name__ == "__main__":
-    run_advanced_backtest("BTC_USDT_1h.csv")
+    run_advanced_backtest()
