@@ -1,39 +1,49 @@
-import ccxt
+import requests
 import pandas as pd
-import os
 
-def fetch_and_save_data(symbol="BTC/USDT", timeframe="1h", limit=1000):
+def fetch_binance_data(symbol="BTCUSDT", interval="1h", limit=1000, filename="BTC_USDT_1h.csv"):
     """
-    바이낸스에서 대용량 캔들 데이터를 가져와 로컬 CSV 파일로 저장합니다.
+    바이낸스 퍼블릭 API를 호출하여 최신 실시간 캔들 데이터를 수집하고 CSV로 저장하는 파이프라인입니다.
     """
-    # 윈도우 파일명 규칙에 맞게 특수문자(/)를 언더바(_)로 변경
-    clean_symbol = symbol.replace('/', '_')
-    filename = f"{clean_symbol}_{timeframe}.csv"
+    print(f"📥 바이낸스 실시간 데이터 수집 중... (종목: {symbol}, 타임프레임: {interval})")
     
-    print(f"[{symbol}] {timeframe} 차트 캔들 {limit}개 수집 및 저장 시작...")
-    exchange = ccxt.binance()
+    url = "https://api.binance.com/api/v3/klines"
+    params = {
+        "symbol": symbol,
+        "interval": interval,
+        "limit": limit
+    }
     
-    # 바이낸스 API 호출 (한 번에 최대 1000개 제한)
-    ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+    # 바이낸스 서버에 데이터 요청
+    response = requests.get(url, params=params)
+    data = response.json()
     
-    # 데이터를 Pandas DataFrame(표)으로 변환
-    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    # 수집한 데이터를 판다스(Pandas) 표 형태로 변환
+    df = pd.DataFrame(data, columns=[
+        'timestamp', 'open', 'high', 'low', 'close', 'volume', 
+        'close_time', 'quote_asset_volume', 'number_of_trades', 
+        'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
+    ])
+    
+    # 사람이 읽을 수 있는 시간으로 변환 및 필수 컬럼 추출
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
+    
+    # 텍스트로 들어온 가격 데이터를 숫자(float)로 변환
+    for col in ['open', 'high', 'low', 'close', 'volume']:
+        df[col] = df[col].astype(float)
+        
     df.set_index('timestamp', inplace=True)
     
-    # CSV 파일로 컴퓨터에 영구 저장 (로컬 데이터베이스화)
+    # 기존 CSV 파일 덮어쓰기 (데이터 최신화)
     df.to_csv(filename)
-    print(f"✅ 저장 완료! 파일명: {filename} (총 {len(df)}개)")
-    
-    return df
+    print(f"✅ [{filename}] 저장 완료! (총 {len(df)}개 캔들 | 최신 캔들 시간: {df.index[-1]})")
 
 if __name__ == "__main__":
-    # 백테스트 비교 분석을 위해 1시간봉(단타/스윙)과 4시간봉(스윙) 데이터를 각각 1,000개씩 다운로드합니다.
-    # 1시간봉 1000개 = 약 41일치 / 4시간봉 1000개 = 약 166일치 과거 데이터
-    print("백테스트용 기초 캔들 데이터 구축을 시작합니다.\n")
+    print("🚀 [Step 12] 실시간 바이낸스 데이터 파이프라인 가동 시작\n")
     
-    df_1h = fetch_and_save_data(symbol="BTC/USDT", timeframe="1h", limit=1000)
-    df_4h = fetch_and_save_data(symbol="BTC/USDT", timeframe="4h", limit=1000)
+    # 1시간봉과 4시간봉 최신 데이터 연속 수집
+    fetch_binance_data(symbol="BTCUSDT", interval="1h", limit=1000, filename="BTC_USDT_1h.csv")
+    fetch_binance_data(symbol="BTCUSDT", interval="4h", limit=1000, filename="BTC_USDT_4h.csv")
     
-    print("\n🎉 모든 데이터 수집 및 로컬 저장소 구축이 완료되었습니다!")
-    
+    print("\n🎉 모든 데이터가 현재 시간 기준으로 최신화되었습니다. 이제 대시보드 엔진을 구동하면 실시간 시장 성과가 반영됩니다.")
