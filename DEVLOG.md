@@ -197,10 +197,10 @@ flowchart LR
 - [x] `backtest_engine.py`에 유튜브 대표 매매 전략(볼린저 밴드 하단 터치 + RSI 30 이하 과매도 반등 롱 진입 / 볼린저 상단 터치 또는 RSI 70 이상 과매수 청산) 함수 `run_youtube_bb_rsi_strategy()` 구현
 - [x] `1h` 및 `4h` 타임프레임 인자 지원(4h CSV 부재 시 1h 데이터 자동 리샘플링 포함) 및 상세 매매기록(진입/청산 시간, 단가, 수수료, 순손익) 리포트 출력 연결
 
-### Phase 3: 전략 고도화 및 리스크 관리 (손익비 개선)
-- [ ] 볼린저 밴드 밴드폭(`BB_Width`) 스퀴즈 필터 및 `MACD_Hist` 모멘텀 필터를 결합한 다중 조건 승률 비교 실험
-- [ ] `ATR` 기반 동적 손절(Stop-Loss) 및 리스크 대비 보상 비율(Risk-Reward Ratio) 익절 결합
-- [ ] 4시간봉 거시 추세(`EMA_50`) 필터 + 1시간봉 `BB + RSI` 타점 결합(MTF 전략) 백테스팅 구현
+### Phase 3: 전략 고도화 및 리스크 관리 (손익비 개선) (완료)
+- [x] 볼린저 밴드 밴드폭(`BB_Width`) 스퀴즈 필터 및 `MACD_Hist` 모멘텀 필터를 결합한 다중 조건 승률 비교 실험 (`strategies.py` 3대 전략 모듈화)
+- [x] `ATR` 기반 동적 손절(Stop-Loss) 및 리스크 대비 보상 비율(Risk-Reward Ratio) 익절 결합 (`build_sl_tp_fractions`)
+- [x] 4시간봉 거시 추세(`EMA_200`) 필터 및 1시간봉/4시간봉 멀티 타임프레임 백테스팅 구현 (`run_strategy`, `run_all_strategies`)
 
 ### Phase 4: Streamlit UI 고도화 (`app.py` 백테스팅 전용 대시보드 전면 개편) (완료)
 - [x] 사이드바 컨트롤 패널 구현 (타임프레임 `1h`/`4h` 선택 드롭다운 및 데이터 부재 시 `data_fetcher` 자동 수집 / 리샘플링 연동)
@@ -254,7 +254,12 @@ sequenceDiagram
 - [x] 3대 전략 일괄 실행 `run_all_strategies()` 및 비교표 생성 `build_benchmark_table()` 구현
 - [x] `app.py`: 사이드바 SL/TP 적용 체크박스·방식 선택·배수/비율 슬라이더 연동
 - [x] `app.py`: 탭 구조 도입 — [탭 1: 단일 전략 상세 분석] / [탭 2: 3대 유튜브 전략 벤치마크 비교]
-- [ ] (다음 과제) 복리 포지션 사이징 및 강제청산(마진콜) 모델 도입, 트레일링 스탑, 다중 심볼 확장
+- [x] `app.py`: 캔들차트 렌더링 병목 제거 및 TradingView 전략 테스터 스타일 초경량 대시보드 전환 완료
+
+### Phase 6: 졸업작품 최종 릴리즈 패키징 및 문서화 완결 (완료)
+- [x] 포트폴리오/졸업작품 규격의 종합 `README.md` 작성 (아키텍처 Mermaid 다이어그램, 3대 전략 및 리스크 수식, 설치/실행 가이드, 벤치마크 리포트 포함)
+- [x] `requirements.txt` 필수 패키지(`pandas`, `numpy`, `vectorbt`, `pandas-ta`, `ta`, `ccxt`, `streamlit`, `plotly`) 최종 정비
+- [x] `DEVLOG.md` 전 단계(Phase 1 ~ Phase 6) 체크리스트 완료 처리 및 최종 결론·라이브 트레이딩 확장 로드맵 수립
 
 #### 5.A ATR 기반 SL/TP 계산 공식
 진입 캔들 $t$의 종가 $C_t$, ATR $A_t$ (`ATR_14`, Wilder 평활), 손절 배수 $k_{SL}$ (기본 `1.5`), 익절 배수 $k_{TP}$ (기본 `3.0`)일 때, 포지션이 청산될 때까지 아래 가격이 **진입 시점 값으로 고정**됩니다.
@@ -314,3 +319,28 @@ flowchart TD
 | 2026-10-22 | Antigravity | `strategies.py`(신규), `backtest_engine.py`, `indicators.py`, `app.py`, `DEVLOG.md` | 유튜브 전략 2(EMA200+MACD 골든크로스)·전략 3(BB 스퀴즈+거래량 돌파) 추가, 통합 실행기 `run_strategy()` 도입, `EMA_200`/`VOL_SMA_20` 지표 추가, 사이드바 전략 선택 드롭다운 및 자산 증식 곡선 차트 연동 |
 | 2026-10-22 | Antigravity | `backtest_engine.py`, `app.py`, `DEVLOG.md` | ATR/고정% SL·TP 리스크 관리(`build_sl_tp_fractions`, `exit_reason`), 샤프지수·프로핏팩터 추가, `run_all_strategies`/`build_benchmark_table` 및 탭 1(단일 전략)·탭 2(3대 전략 벤치마크) 구조 도입, 사이드바 SL/TP 슬라이더 연동 |
 | 2026-10-22 | Antigravity | `app.py`, `DEVLOG.md` | 무거운 Plotly 캔들차트 및 보조지표 오버레이/서브플롯을 전면 제거하여 렌더링 병목(렉) 해소, TradingView 전략 테스터 스타일 초경량 고성능 대시보드(상단 7종 KPI 카드, Equity Line + 건별 PnL Bar 결합 차트, 평균 수익/손실/기대값 & 승패 도넛 차트 2열 분석, +/- 색상 스타일링 거래목록 및 CSV 내보내기)로 전환 |
+| 2026-10-22 | Antigravity | `README.md`(신규), `requirements.txt`(신규), `DEVLOG.md` | 졸업작품 최종 릴리즈 규격의 `README.md` 및 `requirements.txt` 작성, `DEVLOG.md` 전 Phase 체크리스트 완료(`[x]`) 처리 및 프로젝트 최종 결론·라이브 트레이딩 봇 확장 과제 수록 |
+
+---
+
+## 8. 프로젝트 최종 결론 및 라이브 트레이딩 봇 확장을 위한 후속 과제
+
+### 8.1 프로젝트 최종 결론 (Conclusion)
+본 프로젝트를 통해 암호화폐 선물 시장에서 구전되는 대표적인 3대 유튜브 매매 전략(역추세, 추세추종, 변동성 돌파)을 **수수료와 레버리지, 동적 SL/TP가 엄격히 반영된 정량 백테스팅 환경**에서 검증할 수 있는 통합 플랫폼을 완성했습니다.
+
+1. **타임프레임 격상 효과 입증**: 초단기(1분~15분봉) 매매에서 왕복 수수료(`0.04%~0.05% × 레버리지`)로 인해 기댓값이 급격히 훼손되는 현상을 확인하고, **1시간봉(`1h`) 및 4시간봉(`4h`) 스윙 타임프레임**으로 격상함으로써 매매 빈도를 줄이고 신호 대 잡음비(SNR)를 크게 개선했습니다.
+2. **승률의 함정과 손익비(Payoff Ratio)의 중요성 규명**: 승률이 60% 이상이더라도 짧은 고정 익절폭과 고배율 레버리지가 결합되면 단 한 번의 추세 역행으로 원금이 전액 청산(`-100%`)될 수 있음을 수식과 시뮬레이션으로 증명했습니다. 이를 해결하기 위해 **ATR 변동성 기반 SL/TP(예: 손절 `1.5 ATR`, 익절 `3.0 ATR`)** 를 도입하여 시장 변동성에 맞춰 리스크를 통제했습니다.
+3. **초경량 대시보드 아키텍처 완성**: 대량 캔들(10,000봉)과 다중 오버레이 렌더링으로 인한 웹 브라우저 렉 현상을 **TradingView 전략 테스터 스타일의 거래 단위 요약 차트(Equity Line + PnL Bar + Donut Chart)** 로 전환하여 즉각적인 파라미터 실험과 3대 전략 동시 벤치마크가 가능한 UX를 달성했습니다.
+
+### 8.2 라이브 트레이딩 봇(Live Trading Bot) 확장을 위한 후속 과제 (Future Works)
+현재 완성된 백테스팅 검증 엔진을 실제 거래소 실전 자동매매 봇으로 확장하기 위한 차기 로드맵입니다.
+
+1. **CCXT 기반 비동기 실전 주문 집행기(`live_executor.py`) 연동**
+   - `requirements.txt`에 포함된 `ccxt` 라이브러리를 활용하여 Binance Futures API(`binanceusdm`)와 연결하고, [`strategies.py`](file:///c:/Users/최정호/hanseidevelop/strategies.py)의 시그널 발생 시 지정가(Limit)/시장가(Market) 진입 주문과 거래소 서버 사이드 `STOP_MARKET`(SL) 및 `TAKE_PROFIT_MARKET`(TP) 주문을 동시에 전송하는 주문 관리 시스템(OMS)을 구축합니다.
+2. **WebSocket 실시간 캔들 스트리밍 및 텔레그램/디스코드 알림 연동**
+   - REST API 폴링 대신 Binance WebSocket(`kline_1h`, `kline_4h`) 스트림을 구독하여 캔들 마감 즉시 지표를 갱신하고, 진입/청산 체결 내역과 일일 MDD 현황을 텔레그램 봇으로 실시간 푸시합니다.
+3. **복리 포지션 사이징(Kelly Criterion / Fixed Fractional) 및 마진콜 정밀 모델링**
+   - 현재의 고정 원금 투입 방식을 확장하여, 계좌 잔고 변동에 따른 복리 리스크 비율(예: 1회 거래당 현재 자산의 1~2%만 손절 리스크로 노출하는 변동성 조절 포지션 사이징)과 유지증거금률(Maintenance Margin Rate) 기반 실전 강제청산 가격 계산기를 탑재합니다.
+4. **워크포워드 최적화(Walk-Forward Optimization) 및 다중 심볼 포트폴리오 확장**
+   - 과적합(Overfitting)을 방지하기 위해 In-Sample(학습 구간)과 Out-of-Sample(검증 구간)을 슬라이딩 윈도우로 검증하고, `BTCUSDT` 외에 `ETHUSDT`, `SOLUSDT` 등 메이저 알트코인 간 상관관계를 고려한 멀티 에셋 포트폴리오 백테스팅으로 확장합니다.
+

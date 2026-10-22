@@ -1,0 +1,14 @@
+# Core Data & Vectorized Quant Engine
+pandas>=2.0.0
+numpy>=1.24.0
+vectorbt>=0.26.0
+
+# Technical Analysis & Exchange Connectivity
+pandas-ta>=0.3.14b0
+ta>=0.11.0
+ccxt>=4.0.0
+
+# Interactive Web Dashboard & Visualization
+streamlit>=1.32.0
+plotly>=5.18.0
+
