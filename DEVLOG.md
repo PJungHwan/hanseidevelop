@@ -109,6 +109,44 @@ flowchart LR
 
 ---
 
+### 4.3 전략 2: EMA 200 추세 필터 + MACD 골든크로스 추세추종
+- **구현 함수**: `signals_ema_macd` ([strategies.py](file:///c:/Users/최정호/hanseidevelop/strategies.py)), 실행: `run_strategy(strategy="ema_macd")`
+- **사용 지표/파라미터**: `EMA_200` (`EMA_n(t) = α·C_t + (1-α)·EMA_n(t-1)`, `α = 2/(n+1)`, `n = 200`), `MACD(12, 26, 9)`
+  $$\text{MACD\_Line}_t = \text{EMA}_{12}(C_t) - \text{EMA}_{26}(C_t), \quad \text{Signal}_t = \text{EMA}_9(\text{MACD\_Line}_t)$$
+- **진입 규칙 (Long Entry)**: 상승 추세 필터와 골든크로스가 동시에 성립하는 캔들의 종가에서 진입
+  $$C_t > \text{EMA}_{200}(t) \;\land\; \text{MACD}_t > \text{Signal}_t \;\land\; \text{MACD}_{t-1} \le \text{Signal}_{t-1}$$
+  - 옵션 `require_below_zero=True`: 골든크로스가 0선 아래(`MACD_Line < 0`)에서 발생한 경우만 진입 (눌림목 반등 필터)
+- **청산 규칙 (Long Exit)**: 둘 중 하나라도 발생하면 청산
+  $$\left(\text{MACD}_t < \text{Signal}_t \;\land\; \text{MACD}_{t-1} \ge \text{Signal}_{t-1}\right) \;\lor\; C_t < \text{EMA}_{200}(t)$$
+  (MACD 데드크로스 또는 EMA 200 하향 이탈)
+- **특징**: 큰 추세에서만 매매하여 역추세 진입을 배제하지만, 횡보장에서는 잦은 크로스로 휩소(Whipsaw)에 취약.
+
+### 4.4 전략 3: 볼린저 밴드 스퀴즈 + 거래량 급증 돌파
+- **구현 함수**: `signals_bb_squeeze` ([strategies.py](file:///c:/Users/최정호/hanseidevelop/strategies.py)), 실행: `run_strategy(strategy="bb_squeeze")`
+- **사용 지표/파라미터**: `BB(20, 2.0)`, 밴드폭 `BB_Width`, 거래량 이동평균 `VOL_SMA_20`
+  $$\text{BB\_Width}_t = \frac{\text{BB\_Upper}_t - \text{BB\_Lower}_t}{\text{BB\_Middle}_t} \times 100, \quad \text{VOL\_SMA\_20}_t = \frac{1}{20}\sum_{i=0}^{19} V_{t-i}$$
+
+| 파라미터 | 기본값 | 설명 |
+| :--- | :--- | :--- |
+| `squeeze_lookback` | `120` | 스퀴즈 기준 분위수 산출 구간(봉 수) |
+| `squeeze_quantile` | `0.2` | 밴드폭이 최근 구간 하위 20% 이하이면 스퀴즈 (사이드바에서 조절) |
+| `squeeze_window` | `5` | 돌파 직전 스퀴즈 발생 여부를 확인하는 봉 수 |
+| `vol_mult` | `2.0` | 거래량 급증 배수 (사이드바에서 조절) |
+
+- **스퀴즈 판정**:
+  $$\text{Squeeze}_t = \left[\text{BB\_Width}_t \le Q_{0.2}\left(\text{BB\_Width}_{t-119..t}\right)\right]$$
+- **진입 규칙 (Long Entry)**: 직전 5봉(현재 캔들 제외) 내 스퀴즈 발생 후 거래량을 동반한 상단 돌파
+  $$\max_{k=1..5}\text{Squeeze}_{t-k} = 1 \;\land\; C_t > \text{BB\_Upper}_t \;\land\; V_t > 2.0 \cdot \text{VOL\_SMA\_20}_t$$
+- **청산 규칙 (Long Exit)**: 종가가 볼린저 중심선 하향 이탈 ($C_t < \text{BB\_Middle}_t$)
+- **특징**: 변동성 수축 후 확장 국면을 포착하며, 거래량 조건으로 가짜 돌파(Fake Breakout)를 줄임. 신호 빈도가 낮아 표본 수가 적을 수 있음.
+
+### 4.5 전략 선택 및 자산 증식 곡선 연동
+- 사이드바 **`🎯 매매 전략 선택`** 드롭다운(`STRATEGY_LABELS`)에서 3개 전략 중 하나를 선택하면 `run_strategy(strategy=...)`가 즉시 재실행됩니다. (전략 1: `bb_rsi`, 전략 2: `ema_macd`, 전략 3: `bb_squeeze`; 기존 `run_youtube_bb_rsi_strategy`는 전략 1 래퍼로 유지)
+- 전략 2 선택 시 메인 차트에 `EMA_200` 라인이 추가 표시됩니다.
+- **자산 증식 곡선(Equity Curve)**: 엔진이 반환하는 `equity_curve`(시작 시점 초기 자본금 + 각 청산 시각의 `cumulative_equity`, 계단형 `hv` 라인)를 메인 차트 아래에 상시 표시하며 초기 자본금 기준선을 함께 그립니다. 최종 잔고가 초기 자본금 이상이면 초록색, 미만이면 빨간색.
+
+---
+
 ## 5. 성과 지표 계산 공식 및 거래 기록(Trade Log) 데이터 구조
 
 ### 5.1 핵심 성과 지표 수식 (수수료 및 레버리지 반영)
@@ -171,6 +209,7 @@ flowchart LR
 - [x] 메인 상단 6대 핵심 성과 요약 카드(`st.metric`) 배치: 총수익률(%), 총수익금(Gross Profit), 총손실금(Gross Loss), 총 지불 수수료(Fees), 승률(Win Rate), 최대 낙폭(MDD)
 - [x] Plotly `make_subplots` 기반 인터랙티브 캔들차트 + 볼린저 밴드/이동평균선 오버레이 + 롱 진입(초록 삼각형 화살표) / 청산(빨간 X 마커) 타점 시각화 + RSI/MACD 연동 서브플롯 구현
 - [x] 하단 상세 매매 기록(`Trade Log`) 데이터프레임 출력 및 UTF-8 BOM(`utf-8-sig`) 인코딩 기반 `CSV 다운로드` 버튼 탑재
+- [x] 사이드바 유튜브 매매 전략 3종 선택 드롭다운 연동 및 메인 차트 하단 자산 증식 곡선(Equity Curve) 라인 차트 추가 (상세: 4.3 ~ 4.5)
 
 #### 4.1 대시보드 UI 구성 요소 명세 ([app.py](file:///c:/Users/최정호/hanseidevelop/app.py))
 
@@ -216,3 +255,4 @@ sequenceDiagram
 | 2026-10-22 | Antigravity | `indicators.py`, `backtest_engine.py`, `DEVLOG.md` | `indicators.py` 5대 핵심 보조지표(SMA/EMA, BB 상·중·하·폭, MACD, RSI, ATR) 무결측 연산 고도화, `backtest_engine.py`에 1H/4H 지원 유튜브 BB+RSI 매매 전략(`run_youtube_bb_rsi_strategy`) 탑재 및 `DEVLOG.md` 수식/규칙 문서화 |
 | 2026-10-22 | Antigravity | `app.py`, `DEVLOG.md` | `app.py`를 백테스팅 전용 완성형 대시보드로 전면 개편(1H/4H 자동 수집·변환, 보조지표 토글, 파라미터 슬라이더, 6대 KPI 카드, 진입/청산 마커 캔들차트 & RSI/MACD 서브차트, Trade Log 및 CSV 다운로드) 및 `DEVLOG.md` Phase 4 문서화 완료 |
 | 2026-10-22 | Antigravity | `indicators.py`, `DEVLOG.md` | `get_bbands()` 내 볼린저 밴드 표준편차 연산 시 `NDFrame.rolling()`의 `ddof` 인자 위치 오류 수정 (`series.rolling(window=length).std(ddof=0)`) |
+| 2026-10-22 | Antigravity | `strategies.py`(신규), `backtest_engine.py`, `indicators.py`, `app.py`, `DEVLOG.md` | 유튜브 전략 2(EMA200+MACD 골든크로스)·전략 3(BB 스퀴즈+거래량 돌파) 추가, 통합 실행기 `run_strategy()` 도입, `EMA_200`/`VOL_SMA_20` 지표 추가, 사이드바 전략 선택 드롭다운 및 자산 증식 곡선 차트 연동 |

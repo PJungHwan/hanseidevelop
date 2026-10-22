@@ -9,7 +9,13 @@ from data_fetcher import fetch_extensive_binance_data
 from backtest_engine import (
     load_timeframe_data,
     resample_ohlcv,
-    run_youtube_bb_rsi_strategy
+    run_strategy
+)
+from strategies import (
+    STRATEGY_BB_RSI,
+    STRATEGY_EMA_MACD,
+    STRATEGY_BB_SQUEEZE,
+    STRATEGY_LABELS
 )
 
 # --- 웹페이지 기본 세팅 ---
@@ -62,6 +68,18 @@ def ensure_and_load_ohlcv(timeframe: str) -> pd.DataFrame:
 # 1. 사이드바 컨트롤 패널 (Sidebar Control Panel)
 # ==============================================================================
 st.sidebar.title("⚙️ 퀀트 백테스팅 컨트롤 패널")
+st.sidebar.markdown("---")
+
+# [1-0] 유튜브 매매 전략 선택 드롭다운
+st.sidebar.subheader("🎯 매매 전략 선택")
+selected_strategy_label = st.sidebar.selectbox(
+    "유튜브 매매 전략",
+    options=list(STRATEGY_LABELS.values()),
+    index=0,
+    help="선택 즉시 해당 전략으로 백테스팅이 재실행됩니다."
+)
+selected_strategy = next(k for k, v in STRATEGY_LABELS.items() if v == selected_strategy_label)
+
 st.sidebar.markdown("---")
 
 # [1-1] 타임프레임 선택 드롭다운
@@ -140,7 +158,10 @@ with st.sidebar.expander("🔧 세부 지표 주기 및 차트 표시 설정", e
     bb_length = st.number_input("볼린저 밴드 기간 (Length)", min_value=5, max_value=100, value=20, step=1)
     bb_std = st.number_input("볼린저 밴드 표준편차 (Std)", min_value=0.5, max_value=5.0, value=2.0, step=0.1)
     rsi_length = st.number_input("RSI 기간 (Length)", min_value=5, max_value=50, value=14, step=1)
-    strict_rebound = st.checkbox("엄격 반등 확인 후 진입 (양봉 + RSI 상승)", value=False)
+    strict_rebound = st.checkbox("[전략1] 엄격 반등 확인 후 진입 (양봉 + RSI 상승)", value=False)
+    vol_mult = st.number_input("[전략3] 거래량 급증 배수 (20봉 평균 대비)", min_value=1.0, max_value=10.0, value=2.0, step=0.5)
+    squeeze_quantile_pct = st.slider("[전략3] 스퀴즈 기준 밴드폭 하위 분위 (%)", min_value=5, max_value=50, value=20, step=5)
+    squeeze_quantile = squeeze_quantile_pct / 100.0
     max_chart_candles = st.slider(
         "차트 렌더링 최근 캔들 수",
         min_value=200,
@@ -155,9 +176,19 @@ with st.sidebar.expander("🔧 세부 지표 주기 및 차트 표시 설정", e
 # 2. 데이터 로드 및 백테스팅 엔진 실행
 # ==============================================================================
 st.title("📊 퀀트 트레이딩 백테스팅 전용 대시보드")
+STRATEGY_DESCRIPTIONS = {
+    STRATEGY_BB_RSI: (
+        f"볼린저 밴드(`{bb_length}`, `{bb_std}`) 하단 터치 + RSI(`{rsi_length}`) ≤ `{rsi_oversold}` 반등 롱 진입 "
+        f"/ 볼린저 상단 터치 또는 RSI ≥ `{rsi_overbought}` 청산"
+    ),
+    STRATEGY_EMA_MACD: "종가 > EMA 200 상태에서 MACD 골든크로스 롱 진입 / MACD 데드크로스 또는 종가 < EMA 200 청산",
+    STRATEGY_BB_SQUEEZE: (
+        f"볼린저 밴드폭 스퀴즈(하위 `{int(squeeze_quantile * 100)}%`) 직후 종가 > BB 상단 & "
+        f"거래량 ≥ 20봉 평균의 `{vol_mult}`배 돌파 롱 진입 / 종가 < BB 중단 청산"
+    ),
+}
 st.caption(
-    f"**적용 전략:** 볼린저 밴드(`{bb_length}`, `{bb_std}`) 하단 터치 + RSI(`{rsi_length}`) ≤ `{rsi_oversold}` 반등 롱(Long) 진입 "
-    f"/ 볼린저 상단 터치 또는 RSI ≥ `{rsi_overbought}` 청산 | "
+    f"**적용 전략:** {STRATEGY_LABELS[selected_strategy]} — {STRATEGY_DESCRIPTIONS[selected_strategy]} | "
     f"**타임프레임:** `{selected_tf.upper()}` | **초기 자본금:** `${init_cash:,.0f}` | "
     f"**수수료율:** `{fee_pct:.2f}%` | **레버리지:** `{leverage}x`"
 )
@@ -165,9 +196,12 @@ st.caption(
 try:
     with st.spinner(f"BTCUSDT ({selected_tf.upper()}) 데이터 준비 및 백테스팅 시뮬레이션 연산 중..."):
         raw_df = ensure_and_load_ohlcv(selected_tf)
-        bt_result = run_youtube_bb_rsi_strategy(
+        bt_result = run_strategy(
+            strategy=selected_strategy,
             timeframe=selected_tf,
             df_input=raw_df,
+            vol_mult=float(vol_mult),
+            squeeze_quantile=float(squeeze_quantile),
             bb_length=int(bb_length),
             bb_std=float(bb_std),
             rsi_length=int(rsi_length),
@@ -305,6 +339,18 @@ try:
                     mode="lines",
                     name=ema_col,
                     line=dict(color="#29b6f6", width=1.5)
+                ),
+                row=1, col=1
+            )
+        # 전략 2 선택 시 추세 필터 EMA 200 추가 표시
+        if selected_strategy == STRATEGY_EMA_MACD and "EMA_200" in plot_df.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=plot_df.index,
+                    y=plot_df["EMA_200"],
+                    mode="lines",
+                    name="EMA_200 (추세 필터)",
+                    line=dict(color="#ff7043", width=2)
                 ),
                 row=1, col=1
             )
@@ -473,26 +519,35 @@ try:
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    # 누적 자산 곡선 (Equity Curve) 확장 탭
-    with st.expander("💹 누적 계좌 잔고 곡선 (Equity Curve) 보기", expanded=False):
-        if len(trades_df) > 0:
-            eq_fig = go.Figure()
-            eq_fig.add_trace(
-                go.Scatter(
-                    x=trades_df["exit_timestamp"],
-                    y=trades_df["cumulative_equity"],
-                    mode="lines+markers",
-                    name="누적 자산 (USDT)",
-                    line=dict(color="#00e676", width=2),
-                    fill="tozeroy",
-                    fillcolor="rgba(0, 230, 118, 0.08)"
-                )
+    # 자산 증식 곡선 (Equity Curve): 메인 차트 바로 아래 상시 표시
+    st.subheader("💹 자산 증식 곡선 (Equity Curve)")
+    if len(trades_df) > 0:
+        equity_curve = bt_result["equity_curve"]
+        final_equity = float(equity_curve.iloc[-1])
+        line_color = "#00e676" if final_equity >= init_cash else "#ff5252"
+        eq_fig = go.Figure()
+        eq_fig.add_trace(
+            go.Scatter(
+                x=equity_curve.index,
+                y=equity_curve.values,
+                mode="lines+markers",
+                line=dict(color=line_color, width=2, shape="hv"),
+                marker=dict(size=4),
+                name="계좌 잔고 (USDT)",
+                hovertemplate="시각: %{x}<br>잔고: $%{y:,.2f}<extra></extra>"
             )
-            eq_fig.add_hline(y=init_cash, line_dash="dash", line_color="#9e9e9e", annotation_text="초기 자본금")
-            eq_fig.update_layout(template="plotly_dark", height=320, margin=dict(l=20, r=20, t=30, b=20))
-            st.plotly_chart(eq_fig, use_container_width=True)
-        else:
-            st.info("거래 내역이 없어 누적 자산 곡선을 표시할 수 없습니다.")
+        )
+        eq_fig.add_hline(y=init_cash, line_dash="dash", line_color="#9e9e9e", annotation_text="초기 자본금")
+        eq_fig.update_layout(
+            template="plotly_dark",
+            height=320,
+            margin=dict(l=20, r=20, t=30, b=20),
+            yaxis_title="USDT",
+            hovermode="x unified"
+        )
+        st.plotly_chart(eq_fig, use_container_width=True)
+    else:
+        st.info("거래 내역이 없어 자산 증식 곡선을 표시할 수 없습니다.")
 
     st.markdown("---")
 

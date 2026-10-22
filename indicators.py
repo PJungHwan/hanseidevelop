@@ -132,6 +132,8 @@ def add_indicators(
     df[f'SMA_{sma_length}'] = get_sma(df['close'], length=sma_length)
     df[f'EMA_{ema_length}'] = get_ema(df['close'], length=ema_length)
     df['ZLSMA'] = get_zlsma(df['close'], length=130)
+    df['EMA_200'] = get_ema(df['close'], length=200)  # 전략 2 추세 필터용
+    df['VOL_SMA_20'] = df['volume'].rolling(window=20).mean()  # 전략 3 거래량 급증 판단용
 
     # 2. 볼린저 밴드 (상단, 중단, 하단, 밴드폭)
     bb_df = get_bbands(df['close'], length=bb_length, std=bb_std)

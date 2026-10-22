@@ -8,6 +8,10 @@ try:
 except ImportError:
     HAS_VBT = False
 
+from strategies import (
+    STRATEGY_BB_RSI, STRATEGY_EMA_MACD, STRATEGY_BB_SQUEEZE, STRATEGY_LABELS,
+    signals_bb_rsi, signals_ema_macd, signals_bb_squeeze
+)
 from indicators import (
     get_atr,
     get_zlsma,
@@ -304,7 +308,8 @@ def print_backtest_report(title: str, summary: dict, trades_df: pd.DataFrame, ma
     print("=" * 78)
 
 
-def run_youtube_bb_rsi_strategy(
+def run_strategy(
+    strategy: str = STRATEGY_BB_RSI,
     timeframe: str = "1h",
     csv_path: str = None,
     df_input: pd.DataFrame = None,
@@ -316,21 +321,21 @@ def run_youtube_bb_rsi_strategy(
     init_cash: float = 10000.0,
     leverage: float = 1.0,
     fee_rate: float = 0.0004,
-    strict_rebound: bool = False
+    strict_rebound: bool = False,
+    vol_mult: float = 2.0,
+    squeeze_quantile: float = 0.2
 ):
     """
-    [유튜브 대표 매매 전략: 볼린저 밴드 하단 터치 + RSI 과매도 반등 롱(Long) 전략]
-    - 타임프레임: '1h' (1시간봉) 또는 '4h' (4시간봉) 인자 지원
-    - 롱(Long) 진입 조건:
-        1) 직전 또는 현재 캔들이 볼린저 밴드 하단(BB_Lower)을 터치/이탈 (low <= BB_Lower 또는 close <= BB_Lower)
-        2) RSI가 과매도 구간(기본 30 이하)에 진입했거나 직전 과매도 침체 후 반등(RSI > prev_RSI & close > open)할 때 진입
-    - 롱(Long) 청산 조건:
-        1) 캔들이 볼린저 밴드 상단(BB_Upper)을 터치/돌파 (high >= BB_Upper 또는 close >= BB_Upper)
-        2) 또는 RSI가 과매수 구간(기본 70 이상)에 도달할 때 청산 (RSI >= 70)
+    3종 유튜브 매매 전략 통합 백테스트 실행기.
+    - strategy: 'bb_rsi'(볼린저+RSI 역추세) / 'ema_macd'(EMA200+MACD 골든크로스) / 'bb_squeeze'(스퀴즈+거래량 돌파)
+    - timeframe: '1h' 또는 '4h'
+    반환: timeframe, strategy, summary, trades, portfolio, data(지표 DF), equity_curve(Series)
     """
     tf = timeframe.lower().strip()
     if tf not in ("1h", "4h"):
         raise ValueError("timeframe 인자는 '1h' 또는 '4h'여야 합니다.")
+    if strategy not in STRATEGY_LABELS:
+        raise ValueError(f"지원하지 않는 전략입니다: {strategy} (가능: {list(STRATEGY_LABELS)})")
 
     if df_input is not None:
         raw_df = df_input.copy()
@@ -351,30 +356,28 @@ def run_youtube_bb_rsi_strategy(
         dropna=True
     )
 
-    # --- [진입 조건: 볼린저 밴드 하단 터치 + RSI 과매도(30 이하) 반등] ---
-    bb_lower_touch = (df['low'] <= df['BB_Lower']) | (df['low'].shift(1) <= df['BB_Lower'].shift(1))
-    rsi_oversold_zone = (df['RSI'] <= rsi_oversold) | (df['RSI'].shift(1) <= rsi_oversold)
-    rsi_rebound = (df['RSI'] > df['RSI'].shift(1)) & (df['close'] >= df['open'])
-
-    if strict_rebound:
-        # 엄격 모드: 하단 밴드 터치 + 과매도 이력 + 양봉 & RSI 상승 반등 확인 시 진입
-        entries = bb_lower_touch & rsi_oversold_zone & rsi_rebound
+    if strategy == STRATEGY_BB_RSI:
+        entries, exits = signals_bb_rsi(
+            df, rsi_oversold=rsi_oversold, rsi_overbought=rsi_overbought, strict_rebound=strict_rebound
+        )
+        strategy_title = (
+            f"[전략1 BB+RSI 역추세 ({tf.upper()})] "
+            f"BB({bb_length},{bb_std}) 하단터치 + RSI({rsi_length})≤{int(rsi_oversold)} 반등 진입 / "
+            f"BB 상단터치 or RSI≥{int(rsi_overbought)} 청산 (레버리지 {leverage}x)"
+        )
+    elif strategy == STRATEGY_EMA_MACD:
+        entries, exits = signals_ema_macd(df)
+        strategy_title = (
+            f"[전략2 EMA200+MACD 추세추종 ({tf.upper()})] "
+            f"종가>EMA200 & MACD 골든크로스 진입 / MACD 데드크로스 or 종가<EMA200 청산 (레버리지 {leverage}x)"
+        )
     else:
-        # 표준 모드: (당일 하단 터치 & 과매도) 또는 (직전/당일 하단 터치 & 과매도 후 RSI 반등)
-        direct_touch_oversold = (df['low'] <= df['BB_Lower']) & (df['RSI'] <= rsi_oversold)
-        rebound_after_oversold = bb_lower_touch & rsi_oversold_zone & (df['RSI'] > df['RSI'].shift(1))
-        entries = direct_touch_oversold | rebound_after_oversold
-
-    # --- [청산 조건: 볼린저 밴드 상단 터치 또는 RSI 과매수(70 이상)] ---
-    bb_upper_touch = (df['high'] >= df['BB_Upper']) | (df['close'] >= df['BB_Upper'])
-    rsi_overbought_hit = df['RSI'] >= rsi_overbought
-    exits = bb_upper_touch | rsi_overbought_hit
-
-    strategy_title = (
-        f"[유튜브 BB+RSI 전략 ({tf.upper()})] "
-        f"BB({bb_length},{bb_std}) 하단터치 + RSI({rsi_length})≤{int(rsi_oversold)} 반등 진입 / "
-        f"BB 상단터치 or RSI≥{int(rsi_overbought)} 청산 (레버리지 {leverage}x)"
-    )
+        entries, exits = signals_bb_squeeze(df, vol_mult=vol_mult, squeeze_quantile=squeeze_quantile)
+        strategy_title = (
+            f"[전략3 BB 스퀴즈+거래량 돌파 ({tf.upper()})] "
+            f"스퀴즈(BW 하위 {int(squeeze_quantile * 100)}%) 직후 종가>BB상단 & 거래량≥{vol_mult}x 진입 / "
+            f"종가<BB중단 청산 (레버리지 {leverage}x)"
+        )
 
     if HAS_VBT:
         pf = vbt.Portfolio.from_signals(
@@ -394,15 +397,33 @@ def run_youtube_bb_rsi_strategy(
             init_cash=init_cash, leverage=leverage, fee_rate=fee_rate
         )
 
+    # 자산 증식 곡선: 시작 시점 초기 자본금 + 각 청산 시각의 누적 잔고
+    if len(trades_df) > 0:
+        equity_curve = pd.concat([
+            pd.Series([init_cash], index=[df.index[0]]),
+            pd.Series(trades_df["cumulative_equity"].values, index=pd.DatetimeIndex(trades_df["exit_timestamp"]))
+        ])
+        equity_curve = equity_curve[~equity_curve.index.duplicated(keep="last")]
+    else:
+        equity_curve = pd.Series([init_cash, init_cash], index=[df.index[0], df.index[-1]])
+
     print_backtest_report(strategy_title, summary, trades_df)
 
     return {
         "timeframe": tf,
+        "strategy": strategy,
+        "strategy_title": strategy_title,
         "summary": summary,
         "trades": trades_df,
         "portfolio": pf,
-        "data": df
+        "data": df,
+        "equity_curve": equity_curve
     }
+
+
+def run_youtube_bb_rsi_strategy(timeframe: str = "1h", **kwargs):
+    """[하위 호환] 전략 1(볼린저 밴드 + RSI 역추세) 실행 래퍼."""
+    return run_strategy(strategy=STRATEGY_BB_RSI, timeframe=timeframe, **kwargs)
 
 
 def run_strategy_benchmark(csv_1h="BTC_USDT_1h.csv", init_cash=10000.0, leverage=50.0, fee_rate=0.0004, freq='1h'):
@@ -481,8 +502,9 @@ if __name__ == "__main__":
     print("==============================================================================")
 
     if os.path.exists("BTC_USDT_1h.csv") or os.path.exists("BTC_USDT_4h.csv"):
-        res_1h = run_youtube_bb_rsi_strategy(timeframe="1h", leverage=5.0)
-        res_4h = run_youtube_bb_rsi_strategy(timeframe="4h", leverage=5.0)
+        for _strat in STRATEGY_LABELS:
+            for _tf in ("1h", "4h"):
+                run_strategy(strategy=_strat, timeframe=_tf, leverage=5.0)
         if os.path.exists("BTC_USDT_1h.csv"):
             run_strategy_benchmark("BTC_USDT_1h.csv")
     else:
@@ -502,31 +524,6 @@ if __name__ == "__main__":
             "open": open_p, "high": high_p, "low": low_p, "close": close_p, "volume": vol_p
         }, index=idx)
 
-        res_1h = run_youtube_bb_rsi_strategy(timeframe="1h", df_input=synth_df, leverage=5.0)
-        res_4h = run_youtube_bb_rsi_strategy(timeframe="4h", df_input=synth_df, leverage=5.0)
-
-    if os.path.exists("BTC_USDT_1h.csv") or os.path.exists("BTC_USDT_4h.csv"):
-        res_1h = run_youtube_bb_rsi_strategy(timeframe="1h", leverage=5.0)
-        res_4h = run_youtube_bb_rsi_strategy(timeframe="4h", leverage=5.0)
-        if os.path.exists("BTC_USDT_1h.csv"):
-            run_strategy_benchmark("BTC_USDT_1h.csv")
-    else:
-        print("ℹ️ 로컬 CSV('BTC_USDT_1h.csv')가 없어 시뮬레이션 샘플 캔들(2,000개 1H)로 1H 및 4H 전략을 테스트합니다.")
-        rng = np.random.default_rng(7)
-        idx = pd.date_range("2026-01-01", periods=2000, freq="1h")
-        # 평균회귀 + 파동 특성을 가진 현실적인 가격 시계열 생성
-        t = np.linspace(0, 40 * np.pi, 2000)
-        base_wave = 65000 + 2500 * np.sin(t) + np.cumsum(rng.normal(0, 120, size=2000))
-        open_p = base_wave + rng.normal(0, 80, size=2000)
-        close_p = base_wave + rng.normal(0, 80, size=2000)
-        high_p = np.maximum(open_p, close_p) + rng.uniform(50, 350, size=2000)
-        low_p = np.minimum(open_p, close_p) - rng.uniform(50, 350, size=2000)
-        vol_p = rng.uniform(100, 1500, size=2000)
-
-        synth_df = pd.DataFrame({
-            "open": open_p, "high": high_p, "low": low_p, "close": close_p, "volume": vol_p
-        }, index=idx)
-
-        res_1h = run_youtube_bb_rsi_strategy(timeframe="1h", df_input=synth_df, leverage=5.0)
-        res_4h = run_youtube_bb_rsi_strategy(timeframe="4h", df_input=synth_df, leverage=5.0)
-
+        for _strat in STRATEGY_LABELS:
+            for _tf in ("1h", "4h"):
+                run_strategy(strategy=_strat, timeframe=_tf, df_input=synth_df, leverage=5.0)
