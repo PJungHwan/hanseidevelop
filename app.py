@@ -20,12 +20,60 @@ from strategies import (
     STRATEGY_LABELS
 )
 
-# --- 웹페이지 기본 세팅 ---
+# --- 웹페이지 기본 세팅 (TradingView Strategy Tester 스타일) ---
 st.set_page_config(
-    page_title="Quant Backtesting Pro Dashboard",
-    page_icon="📊",
+    page_title="TradingView Strategy Tester Pro",
+    page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded"
+)
+
+# --- TradingView 다크 테마 커스텀 CSS ---
+st.markdown(
+    """
+    <style>
+    .tv-kpi-grid {
+        display: grid;
+        grid-template-columns: repeat(7, minmax(120px, 1fr));
+        gap: 10px;
+        margin-bottom: 18px;
+    }
+    @media (max-width: 1200px) {
+        .tv-kpi-grid {
+            grid-template-columns: repeat(3, minmax(120px, 1fr));
+        }
+    }
+    .tv-kpi-card {
+        background: #131722;
+        border: 1px solid #2a2e39;
+        border-radius: 8px;
+        padding: 12px 14px;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.25);
+    }
+    .tv-kpi-label {
+        font-size: 12px;
+        color: #787b86;
+        margin-bottom: 6px;
+        font-weight: 600;
+        letter-spacing: 0.2px;
+    }
+    .tv-kpi-value {
+        font-size: 20px;
+        font-weight: 700;
+        line-height: 1.2;
+        color: #d1d4dc;
+    }
+    .tv-kpi-sub {
+        font-size: 12px;
+        margin-top: 4px;
+        font-weight: 500;
+    }
+    .tv-pos { color: #089981 !important; }
+    .tv-neg { color: #f23645 !important; }
+    .tv-neu { color: #b2b5be !important; }
+    </style>
+    """,
+    unsafe_allow_html=True
 )
 
 
@@ -50,7 +98,6 @@ def ensure_and_load_ohlcv(timeframe: str) -> pd.DataFrame:
         df_4h.to_csv(target_csv)
         return df_4h
 
-    # 로컬 파일이 전혀 없는 경우 data_fetcher를 통해 자동 수집 시도
     target_candles = 10000 if tf == "1h" else 3000
     fetch_extensive_binance_data(
         symbol="BTCUSDT",
@@ -66,13 +113,23 @@ def ensure_and_load_ohlcv(timeframe: str) -> pd.DataFrame:
     return load_timeframe_data(timeframe=tf)
 
 
+def compute_max_drawdown_usd(equity_curve: pd.Series, init_cash: float) -> float:
+    """자산 증식 곡선으로부터 고점 대비 최대 손실폭 금액($)을 계산합니다."""
+    if equity_curve is None or len(equity_curve) == 0:
+        return 0.0
+    eq_vals = np.concatenate([[init_cash], equity_curve.values.astype(float)])
+    peaks = np.maximum.accumulate(eq_vals)
+    dd_usd = eq_vals - peaks
+    return float(np.min(dd_usd))
+
+
 # ==============================================================================
-# 1. 사이드바 컨트롤 패널 (Sidebar Control Panel)
+# 1. 사이드바 컨트롤 패널 (캔들/보조지표 체크박스 완전 제거, 전략/비용/SL·TP 유지)
 # ==============================================================================
-st.sidebar.title("⚙️ 퀀트 백테스팅 컨트롤 패널")
+st.sidebar.title("⚡ 전략 테스터 설정")
 st.sidebar.markdown("---")
 
-# [1-0] 유튜브 매매 전략 선택 드롭다운
+# [1-1] 매매 전략 선택 (3종)
 st.sidebar.subheader("🎯 매매 전략 선택")
 selected_strategy_label = st.sidebar.selectbox(
     "유튜브 매매 전략",
@@ -84,7 +141,7 @@ selected_strategy = next(k for k, v in STRATEGY_LABELS.items() if v == selected_
 
 st.sidebar.markdown("---")
 
-# [1-1] 타임프레임 선택 드롭다운
+# [1-2] 타임프레임 선택 (1h / 4h)
 st.sidebar.subheader("🕒 타임프레임 설정")
 tf_label = st.sidebar.selectbox(
     "분석 타임프레임 선택",
@@ -94,7 +151,6 @@ tf_label = st.sidebar.selectbox(
 )
 selected_tf = "1h" if "1h" in tf_label else "4h"
 
-# 데이터 수동 갱신 버튼
 if st.sidebar.button("🔄 바이낸스 최신 데이터 재수집", use_container_width=True):
     target_csv = f"BTC_USDT_{selected_tf}.csv"
     with st.spinner(f"바이낸스에서 {selected_tf.upper()} 데이터를 새로 수집하는 중..."):
@@ -109,17 +165,8 @@ if st.sidebar.button("🔄 바이낸스 최신 데이터 재수집", use_contain
 
 st.sidebar.markdown("---")
 
-# [1-2] 보조지표 표시 체크박스
-st.sidebar.subheader("📐 차트 보조지표 표시")
-show_ma = st.sidebar.checkbox("이동평균선 (SMA 20 / EMA 50)", value=True)
-show_bb = st.sidebar.checkbox("볼린저 밴드 (BB Upper/Mid/Lower)", value=True)
-show_rsi = st.sidebar.checkbox("RSI (Relative Strength Index)", value=True)
-show_macd = st.sidebar.checkbox("MACD (Line / Signal / Hist)", value=True)
-
-st.sidebar.markdown("---")
-
-# [1-3] 백테스팅 파라미터 조절
-st.sidebar.subheader("💰 백테스팅 & 전략 파라미터")
+# [1-3] 백테스팅 비용 & 레버리지 파라미터
+st.sidebar.subheader("💰 자본금 · 레버리지 · 수수료")
 init_cash = st.sidebar.number_input(
     "초기 자본금 (USDT)",
     min_value=100.0,
@@ -153,17 +200,17 @@ rsi_oversold, rsi_overbought = st.sidebar.slider(
     max_value=90,
     value=(30, 70),
     step=1,
-    help="볼린저 하단 터치 + RSI 과매도 이하 반등 시 롱 진입 / 볼린저 상단 터치 또는 RSI 과매수 이상 도달 시 청산"
+    help="전략 1(BB+RSI)에서 RSI 과매도 진입 및 과매수 청산 기준으로 사용됩니다."
 )
 
 st.sidebar.markdown("---")
 
-# [1-4] 리스크 관리 (손절 / 익절)
-st.sidebar.subheader("🛡️ 리스크 관리 (손절 / 익절)")
+# [1-4] 리스크 관리 (SL / TP)
+st.sidebar.subheader("🛡️ 리스크 관리 (SL / TP)")
 use_sl_tp = st.sidebar.checkbox(
     "손절/익절(SL/TP) 적용",
     value=False,
-    help="켜면 전략의 청산 시그널과 별개로, 진입가 기준 SL/TP 가격에 먼저 닿는 쪽으로 청산됩니다. (캔들 고가/저가 기준 장중 터치 판정)"
+    help="켜면 전략의 청산 시그널과 별개로 진입가 기준 SL/TP 가격에 먼저 닿는 쪽으로 청산됩니다."
 )
 sl_tp_mode_label = st.sidebar.radio(
     "SL/TP 산출 방식",
@@ -183,7 +230,7 @@ else:
     tp_pct = st.sidebar.slider("익절 (%) - 1배수 가격 기준", min_value=0.5, max_value=40.0, value=4.0, step=0.5, disabled=not use_sl_tp)
     st.sidebar.caption(f"레버리지 {leverage}x 적용 시 자본 대비 손절 ≈ {sl_pct * leverage:.1f}% / 익절 ≈ {tp_pct * leverage:.1f}%")
 
-with st.sidebar.expander("🔧 세부 지표 주기 및 차트 표시 설정", expanded=False):
+with st.sidebar.expander("🔧 전략 세부 파라미터 설정", expanded=False):
     bb_length = st.number_input("볼린저 밴드 기간 (Length)", min_value=5, max_value=100, value=20, step=1)
     bb_std = st.number_input("볼린저 밴드 표준편차 (Std)", min_value=0.5, max_value=5.0, value=2.0, step=0.1)
     rsi_length = st.number_input("RSI 기간 (Length)", min_value=5, max_value=50, value=14, step=1)
@@ -191,28 +238,20 @@ with st.sidebar.expander("🔧 세부 지표 주기 및 차트 표시 설정", e
     vol_mult = st.number_input("[전략3] 거래량 급증 배수 (20봉 평균 대비)", min_value=1.0, max_value=10.0, value=2.0, step=0.5)
     squeeze_quantile_pct = st.slider("[전략3] 스퀴즈 기준 밴드폭 하위 분위 (%)", min_value=5, max_value=50, value=20, step=5)
     squeeze_quantile = squeeze_quantile_pct / 100.0
-    max_chart_candles = st.slider(
-        "차트 렌더링 최근 캔들 수",
-        min_value=200,
-        max_value=5000,
-        value=1000,
-        step=100,
-        help="전체 기간 백테스트 후 차트 렌더링 속도를 위해 최근 N개 캔들과 해당 구간 타점을 표시합니다."
-    )
 
 
 # ==============================================================================
 # 2. 데이터 로드 및 백테스팅 엔진 실행
 # ==============================================================================
-st.title("📊 퀀트 트레이딩 백테스팅 전용 대시보드")
+st.title("⚡ TradingView 스타일 전략 테스터 (초경량 고성능 모드)")
 STRATEGY_DESCRIPTIONS = {
     STRATEGY_BB_RSI: (
-        f"볼린저 밴드(`{bb_length}`, `{bb_std}`) 하단 터치 + RSI(`{rsi_length}`) ≤ `{rsi_oversold}` 반등 롱 진입 "
-        f"/ 볼린저 상단 터치 또는 RSI ≥ `{rsi_overbought}` 청산"
+        f"BB(`{bb_length}`, `{bb_std}`) 하단 터치 + RSI(`{rsi_length}`) ≤ `{rsi_oversold}` 반등 롱 진입 "
+        f"/ BB 상단 터치 또는 RSI ≥ `{rsi_overbought}` 청산"
     ),
     STRATEGY_EMA_MACD: "종가 > EMA 200 상태에서 MACD 골든크로스 롱 진입 / MACD 데드크로스 또는 종가 < EMA 200 청산",
     STRATEGY_BB_SQUEEZE: (
-        f"볼린저 밴드폭 스퀴즈(하위 `{int(squeeze_quantile * 100)}%`) 직후 종가 > BB 상단 & "
+        f"BB 밴드폭 스퀴즈(하위 `{int(squeeze_quantile * 100)}%`) 직후 종가 > BB 상단 & "
         f"거래량 ≥ 20봉 평균의 `{vol_mult}`배 돌파 롱 진입 / 종가 < BB 중단 청산"
     ),
 }
@@ -222,17 +261,16 @@ elif sl_tp_mode == "atr":
     risk_desc = f"ATR SL `{sl_atr_mult}x` / TP `{tp_atr_mult}x`"
 else:
     risk_desc = f"고정 SL `{sl_pct}%` / TP `{tp_pct}%`"
+
 st.caption(
-    f"**적용 전략:** {STRATEGY_LABELS[selected_strategy]} — {STRATEGY_DESCRIPTIONS[selected_strategy]} | "
-    f"**SL/TP:** {risk_desc} | "
-    f"**타임프레임:** `{selected_tf.upper()}` | **초기 자본금:** `${init_cash:,.0f}` | "
-    f"**수수료율:** `{fee_pct:.2f}%` | **레버리지:** `{leverage}x`"
+    f"**전략:** {STRATEGY_LABELS[selected_strategy]} ({STRATEGY_DESCRIPTIONS[selected_strategy]}) | "
+    f"**타임프레임:** `{selected_tf.upper()}` | **자본금:** `${init_cash:,.0f}` | "
+    f"**레버리지:** `{leverage}x` | **수수료:** `{fee_pct:.2f}%` | **SL/TP:** {risk_desc}"
 )
 
 try:
-    with st.spinner(f"BTCUSDT ({selected_tf.upper()}) 데이터 준비 및 3대 전략 백테스팅 시뮬레이션 연산 중..."):
+    with st.spinner(f"BTCUSDT ({selected_tf.upper()}) 전략 시뮬레이션 연산 중..."):
         raw_df = ensure_and_load_ohlcv(selected_tf)
-        # 동일 데이터/타임프레임/비용/SL·TP 조건으로 3대 전략을 한 번에 실행 (탭 1·탭 2 공용)
         results = run_all_strategies(
             timeframe=selected_tf,
             df_input=raw_df,
@@ -256,388 +294,316 @@ try:
         )
     bt_result = results[selected_strategy]
 
-    tab1, tab2 = st.tabs(["🔍 탭 1: 단일 전략 상세 분석", "🏁 탭 2: 3대 유튜브 전략 벤치마크 비교"])
+    tab1, tab2 = st.tabs(["📊 탭 1: 전략 테스터 리포트 (Overview & Trades)", "🏁 탭 2: 3대 유튜브 전략 벤치마크 비교"])
 
     with tab1:
         df = bt_result["data"]
         summary = bt_result["summary"]
         trades_df = bt_result["trades"]
+        equity_curve = bt_result["equity_curve"]
 
-        total_return_pct = (summary["net_profit"] / init_cash) * 100.0 if init_cash > 0 else 0.0
+        net_profit = float(summary["net_profit"])
+        total_return_pct = (net_profit / init_cash) * 100.0 if init_cash > 0 else 0.0
+        mdd_pct = float(summary["mdd_pct"])
+        mdd_usd = compute_max_drawdown_usd(equity_curve, init_cash)
+        total_trades = int(summary["total_trades"])
+        win_trades = int(summary["winning_trades"])
+        loss_trades = int(summary["losing_trades"])
+        win_rate = float(summary["win_rate"])
+        pf_val = float(summary["profit_factor"])
+        pf_str = "∞" if np.isinf(pf_val) else f"{pf_val:.2f}"
+        gross_profit = float(summary["total_gross_profit"])
+        gross_loss = float(summary["total_gross_loss"])
+        total_fees = float(summary["total_fees"])
 
-        # ==========================================================================
-        # 3. 상단 요약 카드 (KPI Metrics Row)
-        # ==========================================================================
-        st.subheader("📌 백테스팅 핵심 성과 요약 (Performance Metrics)")
-        m1, m2, m3, m4, m5, m6 = st.columns(6)
+        pnl_cls = "tv-pos" if net_profit >= 0 else "tv-neg"
+        pf_cls = "tv-pos" if (np.isinf(pf_val) or pf_val >= 1.0) else "tv-neg"
 
-        m1.metric(
-            label="총 수익률 (Total Return)",
-            value=f"{total_return_pct:+.2f}%",
-            delta=f"순손익 ${summary['net_profit']:+,.2f}"
-        )
-        m2.metric(
-            label="총 수익금 (Gross Profit)",
-            value=f"+${summary['total_gross_profit']:,.2f}",
-            delta=f"승리 {summary['winning_trades']}회"
-        )
-        m3.metric(
-            label="총 손실금 (Gross Loss)",
-            value=f"-${abs(summary['total_gross_loss']):,.2f}",
-            delta=f"패배 {summary['losing_trades']}회",
-            delta_color="inverse"
-        )
-        m4.metric(
-            label="총 지불 수수료 (Fees)",
-            value=f"${summary['total_fees']:,.2f}",
-            delta=f"편도 {fee_pct:.2f}% × {leverage}x",
-            delta_color="off"
-        )
-        m5.metric(
-            label="승률 (Win Rate)",
-            value=f"{summary['win_rate']:.2f}%",
-            delta=f"총 {summary['total_trades']}회 진입",
-            delta_color="off"
-        )
-        m6.metric(
-            label="최대 낙폭 (MDD)",
-            value=f"{summary['mdd_pct']:.2f}%",
-            delta=f"최종자산 ${summary['final_equity']:,.2f}",
-            delta_color="inverse"
-        )
+        # ======================================================================
+        # [1] 상단: 주요 통계 KPI 헤더 (TradingView 스타일 메트릭 카드)
+        # ======================================================================
+        kpi_html = f"""
+        <div class="tv-kpi-grid">
+            <div class="tv-kpi-card">
+                <div class="tv-kpi-label">총 PnL (Total PnL)</div>
+                <div class="tv-kpi-value {pnl_cls}">${net_profit:+,.2f}</div>
+                <div class="tv-kpi-sub {pnl_cls}">{total_return_pct:+.2f}%</div>
+            </div>
+            <div class="tv-kpi-card">
+                <div class="tv-kpi-label">최대 손실폭 (Max Drawdown)</div>
+                <div class="tv-kpi-value tv-neg">-${abs(mdd_usd):,.2f}</div>
+                <div class="tv-kpi-sub tv-neg">{mdd_pct:.2f}%</div>
+            </div>
+            <div class="tv-kpi-card">
+                <div class="tv-kpi-label">수익성 거래 (Win Rate)</div>
+                <div class="tv-kpi-value">{win_rate:.2f}%</div>
+                <div class="tv-kpi-sub tv-neu">{win_trades} / {total_trades} 거래</div>
+            </div>
+            <div class="tv-kpi-card">
+                <div class="tv-kpi-label">수익 팩터 (Profit Factor)</div>
+                <div class="tv-kpi-value {pf_cls}">{pf_str}</div>
+                <div class="tv-kpi-sub tv-neu">Sharpe {summary['sharpe']:.2f}</div>
+            </div>
+            <div class="tv-kpi-card">
+                <div class="tv-kpi-label">총수익 (Gross Profit)</div>
+                <div class="tv-kpi-value tv-pos">+${gross_profit:,.2f}</div>
+                <div class="tv-kpi-sub tv-pos">승리 {win_trades}건</div>
+            </div>
+            <div class="tv-kpi-card">
+                <div class="tv-kpi-label">총손실 (Gross Loss)</div>
+                <div class="tv-kpi-value tv-neg">-${abs(gross_loss):,.2f}</div>
+                <div class="tv-kpi-sub tv-neg">패배 {loss_trades}건</div>
+            </div>
+            <div class="tv-kpi-card">
+                <div class="tv-kpi-label">총 수수료 (Total Fees)</div>
+                <div class="tv-kpi-value">${total_fees:,.2f}</div>
+                <div class="tv-kpi-sub tv-neu">편도 {fee_pct:.2f}% × {leverage}x</div>
+            </div>
+        </div>
+        """
+        st.markdown(kpi_html, unsafe_allow_html=True)
 
-        st.markdown("---")
+        # ======================================================================
+        # [2] 중단: 누적 성과 차트 (초경량 Equity Line + 건별 손익 Bar 결합)
+        # ======================================================================
+        st.subheader("📈 누적 성과 차트 (Equity Curve & Trade PnL)")
+        if total_trades > 0:
+            trade_nums = trades_df["trade_id"].values
+            cum_pnl_series = trades_df["cumulative_equity"].values - init_cash
+            trade_pnl_vals = trades_df["net_pnl"].values
+            trade_ret_vals = trades_df["net_return_pct"].values
+            exit_times_str = pd.to_datetime(trades_df["exit_timestamp"]).dt.strftime("%Y-%m-%d %H:%M").values
 
-        # ==========================================================================
-        # 4. 메인 캔들차트 (진입/청산 마커 + BB/MA 오버레이) & 서브 차트 (RSI / MACD)
-        # ==========================================================================
-        st.subheader("📈 인터랙티브 캔들차트 & 매매 타점 / 보조지표 연동 뷰")
+            eq_color = "#089981" if net_profit >= 0 else "#f23645"
+            eq_fill = "rgba(8, 153, 129, 0.14)" if net_profit >= 0 else "rgba(242, 54, 69, 0.14)"
+            bar_colors = np.where(trade_pnl_vals >= 0, "#089981", "#f23645")
 
-        plot_df = df.tail(max_chart_candles).copy()
-        plot_start_ts = plot_df.index[0]
-
-        # 활성화된 서브 차트 개수 동적 계산
-        sub_panels = []
-        if show_rsi:
-            sub_panels.append("RSI")
-        if show_macd:
-            sub_panels.append("MACD")
-
-        num_rows = 1 + len(sub_panels)
-        if num_rows == 3:
-            row_heights = [0.58, 0.21, 0.21]
-        elif num_rows == 2:
-            row_heights = [0.72, 0.28]
-        else:
-            row_heights = [1.0]
-
-        subplot_titles = [f"BTC/USDT ({selected_tf.upper()}) 캔들차트 & 매매 타점"]
-        for panel in sub_panels:
-            if panel == "RSI":
-                subplot_titles.append(f"RSI ({rsi_length}) [과매도: {rsi_oversold} / 과매수: {rsi_overbought}]")
-            elif panel == "MACD":
-                subplot_titles.append("MACD (12, 26, 9)")
-
-        fig = make_subplots(
-            rows=num_rows,
-            cols=1,
-            shared_xaxes=True,
-            vertical_spacing=0.04,
-            row_heights=row_heights,
-            subplot_titles=subplot_titles
-        )
-
-        # [Row 1] 메인 캔들차트
-        fig.add_trace(
-            go.Candlestick(
-                x=plot_df.index,
-                open=plot_df["open"],
-                high=plot_df["high"],
-                low=plot_df["low"],
-                close=plot_df["close"],
-                name="BTC/USDT",
-                increasing_line_color="#26a69a",
-                decreasing_line_color="#ef5350"
-            ),
-            row=1, col=1
-        )
-
-        # [Row 1 오버레이] 이동평균선 (SMA 20 / EMA 50)
-        if show_ma:
-            sma_col = next((c for c in plot_df.columns if c.startswith("SMA_")), None)
-            ema_col = next((c for c in plot_df.columns if c.startswith("EMA_")), None)
-            if sma_col:
-                fig.add_trace(
-                    go.Scatter(
-                        x=plot_df.index,
-                        y=plot_df[sma_col],
-                        mode="lines",
-                        name=sma_col,
-                        line=dict(color="#ffca28", width=1.5)
-                    ),
-                    row=1, col=1
+            perf_fig = make_subplots(
+                rows=2,
+                cols=1,
+                shared_xaxes=True,
+                vertical_spacing=0.06,
+                row_heights=[0.65, 0.35],
+                subplot_titles=(
+                    "누적 PnL / 자산 증식 곡선 (USDT)",
+                    "건별 실현 손익 (Trade PnL, USDT)"
                 )
-            if ema_col:
-                fig.add_trace(
-                    go.Scatter(
-                        x=plot_df.index,
-                        y=plot_df[ema_col],
-                        mode="lines",
-                        name=ema_col,
-                        line=dict(color="#29b6f6", width=1.5)
-                    ),
-                    row=1, col=1
-                )
-            # 전략 2 선택 시 추세 필터 EMA 200 추가 표시
-            if selected_strategy == STRATEGY_EMA_MACD and "EMA_200" in plot_df.columns:
-                fig.add_trace(
-                    go.Scatter(
-                        x=plot_df.index,
-                        y=plot_df["EMA_200"],
-                        mode="lines",
-                        name="EMA_200 (추세 필터)",
-                        line=dict(color="#ff7043", width=2)
-                    ),
-                    row=1, col=1
-                )
+            )
 
-        # [Row 1 오버레이] 볼린저 밴드 (상단, 중단, 하단)
-        if show_bb and {"BB_Upper", "BB_Middle", "BB_Lower"}.issubset(plot_df.columns):
-            fig.add_trace(
+            # Row 1: 누적 자산(Equity) 및 누적 PnL 단일 라인
+            perf_fig.add_trace(
                 go.Scatter(
-                    x=plot_df.index,
-                    y=plot_df["BB_Upper"],
+                    x=np.concatenate([[0], trade_nums]),
+                    y=np.concatenate([[init_cash], trades_df["cumulative_equity"].values]),
                     mode="lines",
-                    name="BB Upper",
-                    line=dict(color="rgba(171, 71, 188, 0.75)", width=1.2, dash="dot")
+                    name="누적 자산 (Equity)",
+                    line=dict(color=eq_color, width=2.4),
+                    fill="tozeroy",
+                    fillcolor=eq_fill,
+                    customdata=np.concatenate([
+                        [["시작 시점", 0.0]],
+                        np.stack([exit_times_str, cum_pnl_series], axis=-1)
+                    ]),
+                    hovertemplate=(
+                        "<b>거래 #%{x}</b> (%{customdata[0]})<br>"
+                        "계좌 잔고: $%{y:,.2f}<br>"
+                        "누적 PnL: $%{customdata[1]:+,.2f}<extra></extra>"
+                    )
                 ),
                 row=1, col=1
             )
-            fig.add_trace(
-                go.Scatter(
-                    x=plot_df.index,
-                    y=plot_df["BB_Lower"],
-                    mode="lines",
-                    name="BB Lower",
-                    fill="tonexty",
-                    fillcolor="rgba(171, 71, 188, 0.08)",
-                    line=dict(color="rgba(171, 71, 188, 0.75)", width=1.2, dash="dot")
-                ),
-                row=1, col=1
-            )
-            fig.add_trace(
-                go.Scatter(
-                    x=plot_df.index,
-                    y=plot_df["BB_Middle"],
-                    mode="lines",
-                    name="BB Middle",
-                    line=dict(color="rgba(206, 147, 216, 0.6)", width=1.0, dash="dash")
-                ),
-                row=1, col=1
+            perf_fig.add_hline(
+                y=init_cash, line_dash="dash", line_color="#787b86",
+                annotation_text=f"초기 자본 (${init_cash:,.0f})", row=1, col=1
             )
 
-        # [Row 1 오버레이] 롱 진입(초록색 위 화살표) & 청산(X 마커) 타점 시각화
-        if len(trades_df) > 0:
-            visible_entries = trades_df[trades_df["entry_timestamp"] >= plot_start_ts]
-            visible_exits = trades_df[trades_df["exit_timestamp"] >= plot_start_ts]
-
-            if len(visible_entries) > 0:
-                fig.add_trace(
-                    go.Scatter(
-                        x=visible_entries["entry_timestamp"],
-                        y=visible_entries["entry_price"] * 0.996,
-                        mode="markers",
-                        name="Long 진입 (Entry)",
-                        marker=dict(
-                            symbol="triangle-up",
-                            size=13,
-                            color="#00e676",
-                            line=dict(color="#ffffff", width=1)
-                        ),
-                        customdata=np.stack([
-                            visible_entries["trade_id"],
-                            visible_entries["entry_price"]
-                        ], axis=-1),
-                        hovertemplate=(
-                            "<b>🟢 Long 진입 (#%{customdata[0]})</b><br>"
-                            "시각: %{x}<br>"
-                            "진입 단가: $%{customdata[1]:,.2f}<extra></extra>"
-                        )
-                    ),
-                    row=1, col=1
-                )
-
-            if len(visible_exits) > 0:
-                fig.add_trace(
-                    go.Scatter(
-                        x=visible_exits["exit_timestamp"],
-                        y=visible_exits["exit_price"] * 1.004,
-                        mode="markers",
-                        name="포지션 청산 (Exit)",
-                        marker=dict(
-                            symbol="x",
-                            size=11,
-                            color="#ff5252",
-                            line=dict(color="#ffffff", width=1)
-                        ),
-                        customdata=np.stack([
-                            visible_exits["trade_id"],
-                            visible_exits["exit_price"],
-                            visible_exits["net_return_pct"],
-                            visible_exits["net_pnl"],
-                            visible_exits["fee_paid"]
-                        ], axis=-1),
-                        hovertemplate=(
-                            "<b>❌ 포지션 청산 (#%{customdata[0]})</b><br>"
-                            "시각: %{x}<br>"
-                            "청산 단가: $%{customdata[1]:,.2f}<br>"
-                            "순수익률: %{customdata[2]:+.2f}%<br>"
-                            "순손익금: $%{customdata[3]:+,.2f} (수수료: $%{customdata[4]:,.2f})<extra></extra>"
-                        )
-                    ),
-                    row=1, col=1
-                )
-
-        # [서브 차트 연동] RSI 및 MACD
-        current_row = 2
-        if show_rsi and "RSI" in plot_df.columns:
-            fig.add_trace(
-                go.Scatter(
-                    x=plot_df.index,
-                    y=plot_df["RSI"],
-                    mode="lines",
-                    name=f"RSI ({rsi_length})",
-                    line=dict(color="#b388ff", width=1.6)
-                ),
-                row=current_row, col=1
-            )
-            fig.add_hline(
-                y=rsi_overbought, line_dash="dash", line_color="#ff5252",
-                annotation_text=f"과매수 ({rsi_overbought})", row=current_row, col=1
-            )
-            fig.add_hline(
-                y=rsi_oversold, line_dash="dash", line_color="#00e676",
-                annotation_text=f"과매도 ({rsi_oversold})", row=current_row, col=1
-            )
-            fig.update_yaxes(range=[0, 100], row=current_row, col=1)
-            current_row += 1
-
-        if show_macd and {"MACD_Line", "MACD_Signal", "MACD_Hist"}.issubset(plot_df.columns):
-            hist_colors = np.where(plot_df["MACD_Hist"] >= 0, "#26a69a", "#ef5350")
-            fig.add_trace(
+            # Row 2: 건별 손익 Bar 차트 (Green: 이익, Red: 손실)
+            perf_fig.add_trace(
                 go.Bar(
-                    x=plot_df.index,
-                    y=plot_df["MACD_Hist"],
-                    name="MACD Hist",
-                    marker_color=hist_colors
+                    x=trade_nums,
+                    y=trade_pnl_vals,
+                    name="건별 손익 ($)",
+                    marker_color=bar_colors,
+                    customdata=np.stack([exit_times_str, trade_ret_vals], axis=-1),
+                    hovertemplate=(
+                        "<b>거래 #%{x}</b> (%{customdata[0]})<br>"
+                        "실현 손익: $%{y:+,.2f} (%{customdata[1]:+.2f}%)<extra></extra>"
+                    )
                 ),
-                row=current_row, col=1
+                row=2, col=1
             )
-            fig.add_trace(
-                go.Scatter(
-                    x=plot_df.index,
-                    y=plot_df["MACD_Line"],
-                    mode="lines",
-                    name="MACD Line",
-                    line=dict(color="#42a5f5", width=1.4)
-                ),
-                row=current_row, col=1
-            )
-            fig.add_trace(
-                go.Scatter(
-                    x=plot_df.index,
-                    y=plot_df["MACD_Signal"],
-                    mode="lines",
-                    name="Signal Line",
-                    line=dict(color="#ffa726", width=1.4)
-                ),
-                row=current_row, col=1
-            )
+            perf_fig.add_hline(y=0, line_color="#434651", line_width=1, row=2, col=1)
 
-        chart_height = 550 if num_rows == 1 else (720 if num_rows == 2 else 880)
-        fig.update_layout(
-            template="plotly_dark",
-            height=chart_height,
-            hovermode="x unified",
-            xaxis_rangeslider_visible=False,
-            margin=dict(l=20, r=20, t=40, b=20),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-        # 자산 증식 곡선 (Equity Curve): 메인 차트 바로 아래 상시 표시
-        st.subheader("💹 자산 증식 곡선 (Equity Curve)")
-        if len(trades_df) > 0:
-            equity_curve = bt_result["equity_curve"]
-            final_equity = float(equity_curve.iloc[-1])
-            line_color = "#00e676" if final_equity >= init_cash else "#ff5252"
-            eq_fig = go.Figure()
-            eq_fig.add_trace(
-                go.Scatter(
-                    x=equity_curve.index,
-                    y=equity_curve.values,
-                    mode="lines+markers",
-                    line=dict(color=line_color, width=2, shape="hv"),
-                    marker=dict(size=4),
-                    name="계좌 잔고 (USDT)",
-                    hovertemplate="시각: %{x}<br>잔고: $%{y:,.2f}<extra></extra>"
-                )
-            )
-            eq_fig.add_hline(y=init_cash, line_dash="dash", line_color="#9e9e9e", annotation_text="초기 자본금")
-            eq_fig.update_layout(
+            perf_fig.update_xaxes(title_text="거래 번호 (Trade #)", row=2, col=1)
+            perf_fig.update_yaxes(title_text="잔고 ($)", row=1, col=1)
+            perf_fig.update_yaxes(title_text="건별 PnL ($)", row=2, col=1)
+            perf_fig.update_layout(
                 template="plotly_dark",
-                height=320,
-                margin=dict(l=20, r=20, t=30, b=20),
-                yaxis_title="USDT",
-                hovermode="x unified"
+                paper_bgcolor="#131722",
+                plot_bgcolor="#131722",
+                height=480,
+                hovermode="x unified",
+                showlegend=False,
+                margin=dict(l=20, r=20, t=40, b=20)
             )
-            st.plotly_chart(eq_fig, use_container_width=True)
+            st.plotly_chart(perf_fig, use_container_width=True)
         else:
-            st.info("거래 내역이 없어 자산 증식 곡선을 표시할 수 없습니다.")
+            st.info("거래 내역이 없어 누적 성과 차트를 표시할 수 없습니다.")
 
         st.markdown("---")
 
-        # ==========================================================================
-        # 5. 하단 상세 매매 기록 (Trade Log 테이블 및 CSV 다운로드 버튼)
-        # ==========================================================================
-        st.subheader("📋 상세 매매 기록 (Trade Log)")
+        # ======================================================================
+        # [3] 거래 분석 섹션 (2열 분할: 좌측 수익/손실 분포 & 기대값 | 우측 도넛 차트)
+        # ======================================================================
+        st.subheader("🔍 거래 분석 (Trade Analysis)")
+        if total_trades > 0:
+            win_mask = trades_df["net_pnl"] > 0
+            loss_mask = trades_df["net_pnl"] <= 0
 
-        if len(trades_df) > 0:
-            display_log = trades_df.rename(columns={
-                "trade_id": "거래번호",
-                "entry_timestamp": "진입 시각 (Entry Time)",
-                "exit_timestamp": "청산 시각 (Exit Time)",
-                "direction": "포지션",
-                "entry_price": "진입가 (USDT)",
-                "exit_price": "청산가 (USDT)",
-                "gross_return_pct": "수수료전 수익률 (%)",
-                "fee_paid": "지불 수수료 (USDT)",
-                "net_return_pct": "최종 수익률 (%)",
-                "net_pnl": "실현 손익금 (USDT)",
-                "cumulative_equity": "누적 잔고 (USDT)",
-                "exit_reason": "청산 사유",
-                "status": "상태"
+            avg_win_pct = float(trades_df.loc[win_mask, "net_return_pct"].mean()) if win_trades > 0 else 0.0
+            avg_loss_pct = float(trades_df.loc[loss_mask, "net_return_pct"].mean()) if loss_trades > 0 else 0.0
+            avg_win_usd = float(trades_df.loc[win_mask, "net_pnl"].mean()) if win_trades > 0 else 0.0
+            avg_loss_usd = float(trades_df.loc[loss_mask, "net_pnl"].mean()) if loss_trades > 0 else 0.0
+
+            win_prob = win_trades / total_trades
+            loss_prob = loss_trades / total_trades
+            expectancy_pct = (win_prob * avg_win_pct) + (loss_prob * avg_loss_pct)
+            expectancy_usd = float(trades_df["net_pnl"].mean())
+            payoff_ratio = (avg_win_pct / abs(avg_loss_pct)) if avg_loss_pct != 0 else 0.0
+
+            col_left, col_right = st.columns(2)
+
+            with col_left:
+                st.markdown("##### 📊 수익 / 손실 분포 및 기대값 (Expectancy)")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("평균 수익 (Avg Win)", f"{avg_win_pct:+.2f}%", f"+${avg_win_usd:,.2f}")
+                c2.metric("평균 손실 (Avg Loss)", f"{avg_loss_pct:.2f}%", f"-${abs(avg_loss_usd):,.2f}", delta_color="inverse")
+                c3.metric("1회 기대값 (Expectancy)", f"{expectancy_pct:+.2f}%", f"${expectancy_usd:+,.2f} (손익비 {payoff_ratio:.2f})")
+
+                dist_fig = go.Figure()
+                dist_fig.add_trace(
+                    go.Bar(
+                        x=["평균 수익 (%)", "평균 손실 (%)", "기대값 (Expectancy %)"],
+                        y=[avg_win_pct, abs(avg_loss_pct), expectancy_pct],
+                        text=[f"+{avg_win_pct:.2f}%", f"{avg_loss_pct:.2f}% (절대폭)", f"{expectancy_pct:+.2f}%"],
+                        textposition="auto",
+                        marker_color=[
+                            "#089981",
+                            "#f23645",
+                            "#089981" if expectancy_pct >= 0 else "#f23645"
+                        ]
+                    )
+                )
+                dist_fig.update_layout(
+                    template="plotly_dark",
+                    paper_bgcolor="#131722",
+                    plot_bgcolor="#131722",
+                    height=260,
+                    yaxis_title="비율 (%)",
+                    margin=dict(l=20, r=20, t=20, b=20),
+                    showlegend=False
+                )
+                st.plotly_chart(dist_fig, use_container_width=True)
+
+            with col_right:
+                st.markdown("##### 🍩 거래 승/패 분포 (Win / Loss Donut)")
+                donut_fig = go.Figure(
+                    data=[
+                        go.Pie(
+                            labels=["승자 (Winning)", "패자 (Losing)"],
+                            values=[win_trades, loss_trades],
+                            hole=0.64,
+                            marker=dict(
+                                colors=["#089981", "#f23645"],
+                                line=dict(color="#131722", width=2)
+                            ),
+                            textinfo="label+percent",
+                            hovertemplate="<b>%{label}</b><br>거래 수: %{value}건 (%{percent})<extra></extra>"
+                        )
+                    ]
+                )
+                donut_fig.update_layout(
+                    template="plotly_dark",
+                    paper_bgcolor="#131722",
+                    plot_bgcolor="#131722",
+                    height=335,
+                    margin=dict(l=20, r=20, t=20, b=20),
+                    annotations=[
+                        dict(
+                            text=f"<b>총 {total_trades}건</b><br>승률 {win_rate:.1f}%",
+                            x=0.5, y=0.5, font_size=15, showarrow=False, font_color="#d1d4dc"
+                        )
+                    ],
+                    legend=dict(orientation="h", yanchor="bottom", y=-0.1, xanchor="center", x=0.5)
+                )
+                st.plotly_chart(donut_fig, use_container_width=True)
+        else:
+            st.info("분석할 거래 데이터가 없습니다.")
+
+        st.markdown("---")
+
+        # ======================================================================
+        # [4] 하단: 트레이딩뷰 스타일 '거래목록 (Trade List)' 테이블 & CSV 내보내기
+        # ======================================================================
+        header_col, btn_col = st.columns([3, 1])
+        with header_col:
+            st.subheader("📋 거래목록 (List of Trades)")
+            st.caption(
+                f"테스트 구간: `{df.index[0]}` ~ `{df.index[-1]}` | "
+                f"총 **{total_trades:,}건** (포지션 명목 크기: `${init_cash * leverage:,.0f}` / {leverage}x)"
+            )
+
+        if total_trades > 0:
+            notional_usd = init_cash * leverage
+            pos_label = trades_df["direction"].map(lambda d: "롱 (Long)" if str(d).lower().startswith("long") else "숏 (Short)")
+            btc_qty = np.round(notional_usd / trades_df["entry_price"].astype(float), 4)
+            size_col = [f"{q:.4f} BTC (${notional_usd:,.0f})" for q in btc_qty]
+            exit_reason_col = trades_df["exit_reason"] if "exit_reason" in trades_df.columns else "Signal"
+
+            trade_list_df = pd.DataFrame({
+                "거래 번호": trades_df["trade_id"].astype(int),
+                "포지션": pos_label,
+                "진입 시간": pd.to_datetime(trades_df["entry_timestamp"]).dt.strftime("%Y-%m-%d %H:%M"),
+                "진입 가격": trades_df["entry_price"].astype(float),
+                "청산 시간": pd.to_datetime(trades_df["exit_timestamp"]).dt.strftime("%Y-%m-%d %H:%M"),
+                "청산 가격": trades_df["exit_price"].astype(float),
+                "크기": size_col,
+                "순손익($)": trades_df["net_pnl"].astype(float),
+                "수익률(%)": trades_df["net_return_pct"].astype(float),
+                "청산 사유": exit_reason_col
             })
 
-            col_info, col_btn = st.columns([3, 1])
-            with col_info:
-                st.markdown(
-                    f"총 **{len(trades_df):,}건**의 매매가 기록되었습니다. "
-                    f"(전체 테스트 구간: `{df.index[0]}` ~ `{df.index[-1]}`)"
-                )
-            with col_btn:
-                csv_bytes = trades_df.to_csv(index=False).encode("utf-8-sig")
+            with btn_col:
+                csv_bytes = trade_list_df.to_csv(index=False).encode("utf-8-sig")
                 st.download_button(
-                    label="📥 Trade Log CSV 다운로드",
+                    label="📥 CSV 내보내기",
                     data=csv_bytes,
-                    file_name=f"trade_log_BTCUSDT_{selected_tf}_lev{leverage}x.csv",
+                    file_name=f"tradingview_trades_{selected_strategy}_{selected_tf}.csv",
                     mime="text/csv",
                     use_container_width=True
                 )
 
-            st.dataframe(display_log, use_container_width=True, height=400)
+            def _style_pnl(val):
+                if isinstance(val, (int, float, np.number)):
+                    if val > 0:
+                        return "color: #089981; font-weight: 700;"
+                    elif val < 0:
+                        return "color: #f23645; font-weight: 700;"
+                return ""
+
+            styled_trades = (
+                trade_list_df.style
+                .map(_style_pnl, subset=["순손익($)", "수익률(%)"])
+                .format({
+                    "진입 가격": "${:,.2f}",
+                    "청산 가격": "${:,.2f}",
+                    "순손익($)": "{:+,.2f}",
+                    "수익률(%)": "{:+.2f}%"
+                })
+            )
+            st.dataframe(styled_trades, use_container_width=True, height=420, hide_index=True)
         else:
-            st.warning("현재 설정된 파라미터 조건에서는 매매 진입 내역이 발생하지 않았습니다. RSI 기준값 등을 조정해 보세요.")
+            st.warning("현재 설정된 파라미터 조건에서는 매매 진입 내역이 발생하지 않았습니다.")
 
     with tab2:
         st.subheader("🏁 3대 유튜브 매매 전략 한눈에 비교 (Benchmark)")
@@ -649,7 +615,6 @@ try:
 
         bench_df = build_benchmark_table(results)
 
-        # 최우수 전략 요약 카드
         traded = bench_df[bench_df["거래횟수"] > 0]
         if len(traded) > 0:
             b1, b2, b3 = st.columns(3)
@@ -678,12 +643,7 @@ try:
             file_name=f"benchmark_BTCUSDT_{selected_tf}.csv",
             mime="text/csv"
         )
-        st.caption(
-            "※ 샤프지수: 실현 잔고 곡선의 봉 단위 수익률 기준 연환산(1h: √8,760, 4h: √2,190, 무위험수익률 0). "
-            "SL/TP/시그널 청산: 손절·익절·전략 청산 시그널로 청산된 거래 수."
-        )
 
-        # 전략별 누적 수익률 곡선 비교
         st.subheader("📈 전략별 누적 수익률(%) 곡선 비교")
         cmp_fig = go.Figure()
         for key, res in results.items():
@@ -697,10 +657,15 @@ try:
                     name=STRATEGY_LABELS[key]
                 )
             )
-        cmp_fig.add_hline(y=0, line_dash="dash", line_color="#9e9e9e")
+        cmp_fig.add_hline(y=0, line_dash="dash", line_color="#787b86")
         cmp_fig.update_layout(
-            template="plotly_dark", height=420, hovermode="x unified",
-            yaxis_title="누적 수익률 (%)", margin=dict(l=20, r=20, t=30, b=20),
+            template="plotly_dark",
+            paper_bgcolor="#131722",
+            plot_bgcolor="#131722",
+            height=400,
+            hovermode="x unified",
+            yaxis_title="누적 수익률 (%)",
+            margin=dict(l=20, r=20, t=30, b=20),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
         )
         st.plotly_chart(cmp_fig, use_container_width=True)

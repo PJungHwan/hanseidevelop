@@ -313,3 +313,4 @@ flowchart TD
 | 2026-10-22 | Antigravity | `indicators.py`, `DEVLOG.md` | `get_bbands()` 내 볼린저 밴드 표준편차 연산 시 `NDFrame.rolling()`의 `ddof` 인자 위치 오류 수정 (`series.rolling(window=length).std(ddof=0)`) |
 | 2026-10-22 | Antigravity | `strategies.py`(신규), `backtest_engine.py`, `indicators.py`, `app.py`, `DEVLOG.md` | 유튜브 전략 2(EMA200+MACD 골든크로스)·전략 3(BB 스퀴즈+거래량 돌파) 추가, 통합 실행기 `run_strategy()` 도입, `EMA_200`/`VOL_SMA_20` 지표 추가, 사이드바 전략 선택 드롭다운 및 자산 증식 곡선 차트 연동 |
 | 2026-10-22 | Antigravity | `backtest_engine.py`, `app.py`, `DEVLOG.md` | ATR/고정% SL·TP 리스크 관리(`build_sl_tp_fractions`, `exit_reason`), 샤프지수·프로핏팩터 추가, `run_all_strategies`/`build_benchmark_table` 및 탭 1(단일 전략)·탭 2(3대 전략 벤치마크) 구조 도입, 사이드바 SL/TP 슬라이더 연동 |
+| 2026-10-22 | Antigravity | `app.py`, `DEVLOG.md` | 무거운 Plotly 캔들차트 및 보조지표 오버레이/서브플롯을 전면 제거하여 렌더링 병목(렉) 해소, TradingView 전략 테스터 스타일 초경량 고성능 대시보드(상단 7종 KPI 카드, Equity Line + 건별 PnL Bar 결합 차트, 평균 수익/손실/기대값 & 승패 도넛 차트 2열 분석, +/- 색상 스타일링 거래목록 및 CSV 내보내기)로 전환 |
