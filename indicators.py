@@ -34,7 +34,7 @@ def get_bbands(series: pd.Series, length: int = 20, std: float = 2.0) -> pd.Data
     - BB_Width  : 밴드폭 ((Upper - Lower) / Middle * 100)
     """
     middle = series.rolling(window=length).mean()
-    rolling_std = series.rolling(window=length, ddof=0).std()
+    rolling_std = series.rolling(window=length).std(ddof=0)
     upper = middle + (rolling_std * std)
     lower = middle - (rolling_std * std)
     width = np.where(middle != 0, ((upper - lower) / middle) * 100.0, np.nan)

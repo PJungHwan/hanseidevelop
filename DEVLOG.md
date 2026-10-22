@@ -164,9 +164,47 @@ flowchart LR
 - [ ] `ATR` 기반 동적 손절(Stop-Loss) 및 리스크 대비 보상 비율(Risk-Reward Ratio) 익절 결합
 - [ ] 4시간봉 거시 추세(`EMA_50`) 필터 + 1시간봉 `BB + RSI` 타점 결합(MTF 전략) 백테스팅 구현
 
-### Phase 4: Streamlit 대시보드(`app.py`) 고도화
-- [ ] 대시보드에서 전략 선택(`유튜브 BB+RSI 전략` vs `ZLSMA 돌파 전략`) 및 타임프레임(`1h`, `4h`) 실시간 전환 UI 추가
-- [ ] `backtest_engine.py`가 반환하는 상세 Trade Log 테이블(진입/청산 시각, 진입/청산 단가, 지불 수수료, 건별 손익) 및 MDD 차트 UI 연동
+### Phase 4: Streamlit UI 고도화 (`app.py` 백테스팅 전용 대시보드 전면 개편) (완료)
+- [x] 사이드바 컨트롤 패널 구현 (타임프레임 `1h`/`4h` 선택 드롭다운 및 데이터 부재 시 `data_fetcher` 자동 수집 / 리샘플링 연동)
+- [x] 보조지표 오버레이/서브플롯 표시 토글 체크박스 구현 (`SMA/EMA`, `Bollinger Bands`, `RSI`, `MACD`)
+- [x] 백테스팅 파라미터 실시간 조절 위젯 구현 (초기 자본금 `10,000 USDT`, 수수료율 `0.05%`, 레버리지 배율, RSI 과매도/과매수 슬라이더)
+- [x] 메인 상단 6대 핵심 성과 요약 카드(`st.metric`) 배치: 총수익률(%), 총수익금(Gross Profit), 총손실금(Gross Loss), 총 지불 수수료(Fees), 승률(Win Rate), 최대 낙폭(MDD)
+- [x] Plotly `make_subplots` 기반 인터랙티브 캔들차트 + 볼린저 밴드/이동평균선 오버레이 + 롱 진입(초록 삼각형 화살표) / 청산(빨간 X 마커) 타점 시각화 + RSI/MACD 연동 서브플롯 구현
+- [x] 하단 상세 매매 기록(`Trade Log`) 데이터프레임 출력 및 UTF-8 BOM(`utf-8-sig`) 인코딩 기반 `CSV 다운로드` 버튼 탑재
+
+#### 4.1 대시보드 UI 구성 요소 명세 ([app.py](file:///c:/Users/최정호/hanseidevelop/app.py))
+
+| 영역 | 세부 컴포넌트 | 연동 데이터 및 주요 기능 |
+| :--- | :--- | :--- |
+| **사이드바 컨트롤 패널** | 타임프레임 드롭다운 (`1h` / `4h`) | [`ensure_and_load_ohlcv`](file:///c:/Users/최정호/hanseidevelop/app.py#L24-L60) 호출. 로컬 CSV 부재 시 `1h`→`4h` 자동 리샘플링 또는 [`fetch_extensive_binance_data`](file:///c:/Users/최정호/hanseidevelop/data_fetcher.py#L6-L55)로 바이낸스 API 자동 수집 |
+| **사이드바 컨트롤 패널** | 보조지표 체크박스 4종 | `이동평균선(SMA 20 / EMA 50)`, `볼린저 밴드(Upper/Mid/Lower)`, `RSI`, `MACD` 표시 여부를 동적으로 토글하고 서브플롯 행(Row) 구성을 자동 재조정 |
+| **사이드바 컨트롤 패널** | 백테스팅 파라미터 위젯 | 초기 자본금(기본 `10,000 USDT`), 편도 수수료율(기본 `0.05%`), 레버리지(`1x~50x`), RSI 과매도/과매수 기준 범위 슬라이더(기본 `30 / 70`) |
+| **메인 상단 요약 카드** | 6-Column KPI Metrics (`st.columns(6)`) | `총 수익률(%)`, `총 수익금(Gross Profit)`, `총 손실금(Gross Loss)`, `총 지불 수수료(Fees)`, `승률(Win Rate)`, `최대 낙폭(MDD)` 및 최종 계좌 자산 표시 |
+| **메인 & 서브 차트** | Plotly `make_subplots` 다중 패널 | **Row 1**: 캔들차트 + SMA/EMA + 볼린저 밴드 영역 채우기(`tonexty`) + 롱 진입(`triangle-up`, 초록) / 청산(`x`, 빨강) 마커 오버레이<br>**Row 2~3**: `RSI`(과매도/과매수 기준선 포함) 및 `MACD`(Line, Signal, 양/음수 색상 구분 Histogram) X축 동기화(`shared_xaxes=True`) |
+| **하단 Trade Log 섹션** | 상세 거래 데이터프레임 & 다운로드 | 진입 시각, 청산 시각, 진입가, 청산가, 지불 수수료, 최종 수익률(%), 실현 손익금($), 누적 잔고를 한글 컬럼으로 출력하고 **`📥 Trade Log CSV 다운로드`**(`st.download_button`) 제공 |
+
+#### 4.2 백테스팅 인터랙션 파이프라인 (UI ↔ Engine Data Flow)
+
+```mermaid
+sequenceDiagram
+    participant User as 사용자 (Browser)
+    participant UI as Streamlit UI (app.py)
+    participant Fetcher as Data Layer (data_fetcher.py)
+    participant Ind as Indicator Layer (indicators.py)
+    participant Engine as Backtest Engine (backtest_engine.py)
+
+    User->>UI: 타임프레임(1h/4h), 보조지표 체크박스, 자본금/수수료/레버리지/RSI 슬라이더 조작
+    UI->>UI: ensure_and_load_ohlcv(timeframe) 실행 (@st.cache_data)
+    alt 로컬 CSV 파일 없음
+        UI->>Fetcher: fetch_extensive_binance_data(interval) 또는 1h→4h resample_ohlcv()
+        Fetcher-->>UI: BTC_USDT_{tf}.csv 생성 및 DataFrame 반환
+    end
+    UI->>Engine: run_youtube_bb_rsi_strategy(timeframe, df_input, 파라미터...)
+    Engine->>Ind: add_indicators() 호출 (SMA, EMA, BB, MACD, RSI, ATR 무결측 연산)
+    Ind-->>Engine: 지표 장착 정제 DataFrame 반환
+    Engine-->>UI: summary(총수익/총손실/수수료/승률/MDD), trades_df(Trade Log), df 반환
+    UI-->>User: 6대 KPI 카드 + 캔들/타점/RSI/MACD 통합 차트 + Trade Log 테이블 & CSV 다운로드 렌더링
+```
 
 ---
 
@@ -176,3 +214,5 @@ flowchart LR
 | :--- | :--- | :--- | :--- |
 | 2026-10-22 | Antigravity | `DEVLOG.md`, `backtest_engine.py` | 초기 `DEVLOG.md` 생성 및 `backtest_engine.py` 내 진입/청산 타임스탬프 매핑, 수수료 반영 총수익/총손실/MDD/Trade Log 반환 구조 보완 |
 | 2026-10-22 | Antigravity | `indicators.py`, `backtest_engine.py`, `DEVLOG.md` | `indicators.py` 5대 핵심 보조지표(SMA/EMA, BB 상·중·하·폭, MACD, RSI, ATR) 무결측 연산 고도화, `backtest_engine.py`에 1H/4H 지원 유튜브 BB+RSI 매매 전략(`run_youtube_bb_rsi_strategy`) 탑재 및 `DEVLOG.md` 수식/규칙 문서화 |
+| 2026-10-22 | Antigravity | `app.py`, `DEVLOG.md` | `app.py`를 백테스팅 전용 완성형 대시보드로 전면 개편(1H/4H 자동 수집·변환, 보조지표 토글, 파라미터 슬라이더, 6대 KPI 카드, 진입/청산 마커 캔들차트 & RSI/MACD 서브차트, Trade Log 및 CSV 다운로드) 및 `DEVLOG.md` Phase 4 문서화 완료 |
+| 2026-10-22 | Antigravity | `indicators.py`, `DEVLOG.md` | `get_bbands()` 내 볼린저 밴드 표준편차 연산 시 `NDFrame.rolling()`의 `ddof` 인자 위치 오류 수정 (`series.rolling(window=length).std(ddof=0)`) |
