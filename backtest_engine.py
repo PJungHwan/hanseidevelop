@@ -172,36 +172,60 @@ def extract_backtest_metrics(df, pf, init_cash=10000.0, leverage=1.0, fee_rate=0
     return summary, trades_df
 
 
-def _simulate_signals_fallback(df, entries, exits, init_cash=10000.0, leverage=1.0, fee_rate=0.0004, tp_stop=None, sl_stop=None):
+def _simulate_signals_fallback(df, entries, exits, init_cash=10000.0, leverage=1.0, fee_rate=0.0004,
+                               tp_stop=None, sl_stop=None, sl_frac=None, tp_frac=None):
     """
     vectorbt 미설치 환경에서도 동일하게 동작하는 순수 NumPy/Pandas 기반 백테스트 폴백 엔진입니다.
+    - sl_frac / tp_frac: 진입 캔들 기준 봉별 손절/익절 폭(진입가 대비 비율, 1배수 가격 기준) 배열.
+      (스칼라 sl_stop / tp_stop 도 동일하게 전 구간 상수 배열로 변환되어 처리됩니다.)
+    - 캔들 내 고가/저가로 손절·익절 터치를 판정하고 체결가는 손절/익절 가격으로 가정합니다.
+      같은 캔들에서 둘 다 터치되면 보수적으로 손절을 우선합니다.
     """
     closes = df['close'].values
+    highs = df['high'].values
+    lows = df['low'].values
     timestamps = df.index
+    n = len(closes)
     entries_arr = np.asarray(entries, dtype=bool)
     exits_arr = np.asarray(exits, dtype=bool)
+
+    def _to_arr(arr, scalar):
+        if arr is not None:
+            return np.asarray(arr, dtype=float)
+        if scalar is not None:
+            return np.full(n, float(scalar))
+        return None
+
+    sl_arr = _to_arr(sl_frac, sl_stop)
+    tp_arr = _to_arr(tp_frac, tp_stop)
 
     in_pos = False
     entry_idx = 0
     entry_price = 0.0
+    sl_price = np.nan
+    tp_price = np.nan
     trade_records = []
 
-    for i in range(len(closes)):
+    for i in range(n):
         price = closes[i]
         if not in_pos:
             if entries_arr[i]:
                 in_pos = True
                 entry_idx = i
                 entry_price = price
+                sl_price = entry_price * (1.0 - sl_arr[i]) if (sl_arr is not None and np.isfinite(sl_arr[i])) else np.nan
+                tp_price = entry_price * (1.0 + tp_arr[i]) if (tp_arr is not None and np.isfinite(tp_arr[i])) else np.nan
         else:
-            raw_ret = (price - entry_price) / entry_price
-            hit_tp = (tp_stop is not None) and (raw_ret >= tp_stop)
-            hit_sl = (sl_stop is not None) and (raw_ret <= -sl_stop)
-            if exits_arr[i] or hit_tp or hit_sl:
-                exit_price = entry_price * (1.0 + tp_stop) if hit_tp else (
-                    entry_price * (1.0 - sl_stop) if hit_sl else price
-                )
-                trade_records.append((entry_idx, i, entry_price, exit_price, 1))
+            hit_sl = np.isfinite(sl_price) and lows[i] <= sl_price
+            hit_tp = np.isfinite(tp_price) and highs[i] >= tp_price
+            if hit_sl:
+                trade_records.append((entry_idx, i, entry_price, sl_price, 1))
+                in_pos = False
+            elif hit_tp:
+                trade_records.append((entry_idx, i, entry_price, tp_price, 1))
+                in_pos = False
+            elif exits_arr[i]:
+                trade_records.append((entry_idx, i, entry_price, price, 1))
                 in_pos = False
 
     if len(trade_records) == 0:
@@ -308,6 +332,73 @@ def print_backtest_report(title: str, summary: dict, trades_df: pd.DataFrame, ma
     print("=" * 78)
 
 
+def build_sl_tp_fractions(df, mode="atr", sl_atr_mult=1.5, tp_atr_mult=3.0,
+                          sl_pct=2.0, tp_pct=4.0, atr_col="ATR_14"):
+    """
+    봉별 손절/익절 폭(진입가 대비 비율, 레버리지 미적용 1배수 가격 기준)을 계산합니다.
+    진입 캔들(t)의 값이 해당 포지션에 고정 적용됩니다.
+    - ATR 모드: SL 폭 = sl_atr_mult × ATR_t / C_t,  TP 폭 = tp_atr_mult × ATR_t / C_t
+        (손절가 = C_t - sl_atr_mult × ATR_t,  익절가 = C_t + tp_atr_mult × ATR_t)
+    - 고정 % 모드: SL 폭 = sl_pct / 100,  TP 폭 = tp_pct / 100
+    반환: (sl_frac, tp_frac) numpy 배열 (df 와 동일 길이)
+    """
+    n = len(df)
+    if mode == "atr":
+        if atr_col not in df.columns:
+            raise KeyError(f"ATR 컬럼 '{atr_col}' 이(가) 데이터에 없습니다.")
+        atr_ratio = (df[atr_col] / df['close']).values.astype(float)
+        sl_frac = sl_atr_mult * atr_ratio
+        tp_frac = tp_atr_mult * atr_ratio
+    elif mode == "pct":
+        sl_frac = np.full(n, sl_pct / 100.0)
+        tp_frac = np.full(n, tp_pct / 100.0)
+    else:
+        raise ValueError("sl_tp_mode 는 'atr' 또는 'pct' 여야 합니다.")
+    # 손절폭이 100% 이상이면 의미가 없으므로 상한 처리
+    sl_frac = np.minimum(sl_frac, 0.999)
+    return sl_frac, tp_frac
+
+
+def classify_exit_reasons(trades_df, df, sl_frac, tp_frac):
+    """각 거래의 청산 사유를 'SL'(손절) / 'TP'(익절) / 'Signal'(전략 청산 시그널) / 'Open'(미청산)으로 분류합니다."""
+    n_trades = len(trades_df)
+    reasons = np.full(n_trades, "Signal", dtype=object)
+    if sl_frac is not None and tp_frac is not None and n_trades > 0:
+        entry_pos = df.index.get_indexer(pd.DatetimeIndex(trades_df["entry_timestamp"]))
+        ep = trades_df["entry_price"].values.astype(float)
+        xp = trades_df["exit_price"].values.astype(float)
+        sl_price = ep * (1.0 - sl_frac[entry_pos])
+        tp_price = ep * (1.0 + tp_frac[entry_pos])
+        # 가격은 소수 2자리로 반올림되어 있으므로 허용 오차를 둠
+        is_sl = np.isclose(xp, sl_price, rtol=2e-6, atol=0.011) & (xp < ep)
+        is_tp = np.isclose(xp, tp_price, rtol=2e-6, atol=0.011) & (xp > ep)
+        reasons[is_tp] = "TP"
+        reasons[is_sl] = "SL"
+    if "status" in trades_df.columns:
+        reasons[(trades_df["status"] == "Open").values] = "Open"
+    return reasons
+
+
+def compute_sharpe_ratio(equity_curve, bar_index, timeframe, risk_free=0.0):
+    """
+    연환산 샤프지수.
+    - 거래 청산 시점마다 갱신되는 실현 잔고 곡선을 전체 캔들 인덱스로 전방채움(ffill)해 봉 단위 손익을 구하고,
+      초기 자본금 대비 수익률 r 로 환산 (거래당 고정 명목금액 모델이므로 잔고가 음수여도 안정적)
+    - Sharpe = (mean(r) - rf) / std(r) × sqrt(연간 봉 수)   (1h: 8,760 / 4h: 2,190, 표본표준편차 ddof=1)
+    - 변동이 없거나 표본이 부족하면 0.0
+    """
+    periods_per_year = 8760.0 if timeframe == "1h" else 2190.0
+    eq = equity_curve[~equity_curve.index.duplicated(keep="last")].sort_index()
+    eq = eq.reindex(eq.index.union(bar_index)).ffill().reindex(bar_index).bfill()
+    rets = eq.diff().dropna() / float(equity_curve.iloc[0])  # 초기 자본금 대비 봉별 손익률 (고정 명목금액 모델)
+    if len(rets) < 2:
+        return 0.0
+    std = rets.std(ddof=1)
+    if not np.isfinite(std) or std == 0:
+        return 0.0
+    return float((rets.mean() - risk_free / periods_per_year) / std * np.sqrt(periods_per_year))
+
+
 def run_strategy(
     strategy: str = STRATEGY_BB_RSI,
     timeframe: str = "1h",
@@ -323,12 +414,23 @@ def run_strategy(
     fee_rate: float = 0.0004,
     strict_rebound: bool = False,
     vol_mult: float = 2.0,
-    squeeze_quantile: float = 0.2
+    squeeze_quantile: float = 0.2,
+    use_sl_tp: bool = False,
+    sl_tp_mode: str = "atr",
+    sl_atr_mult: float = 1.5,
+    tp_atr_mult: float = 3.0,
+    sl_pct: float = 2.0,
+    tp_pct: float = 4.0,
+    atr_col: str = "ATR_14",
+    verbose: bool = True
 ):
     """
     3종 유튜브 매매 전략 통합 백테스트 실행기.
     - strategy: 'bb_rsi'(볼린저+RSI 역추세) / 'ema_macd'(EMA200+MACD 골든크로스) / 'bb_squeeze'(스퀴즈+거래량 돌파)
     - timeframe: '1h' 또는 '4h'
+    - use_sl_tp: True 이면 손절/익절 적용 (전략의 청산 시그널과 함께 먼저 발생한 쪽으로 청산)
+        · sl_tp_mode='atr': 손절 = 진입가 - sl_atr_mult × ATR(진입봉), 익절 = 진입가 + tp_atr_mult × ATR(진입봉)
+        · sl_tp_mode='pct': 손절 = 진입가 × (1 - sl_pct/100), 익절 = 진입가 × (1 + tp_pct/100)
     반환: timeframe, strategy, summary, trades, portfolio, data(지표 DF), equity_curve(Series)
     """
     tf = timeframe.lower().strip()
@@ -379,14 +481,35 @@ def run_strategy(
             f"종가<BB중단 청산 (레버리지 {leverage}x)"
         )
 
+    # --- 리스크 관리: 손절(SL) / 익절(TP) 폭 산출 (진입가 대비 비율, 1배수 가격 기준) ---
+    sl_frac = tp_frac = None
+    if use_sl_tp:
+        sl_frac, tp_frac = build_sl_tp_fractions(
+            df, mode=sl_tp_mode, sl_atr_mult=sl_atr_mult, tp_atr_mult=tp_atr_mult,
+            sl_pct=sl_pct, tp_pct=tp_pct, atr_col=atr_col
+        )
+        if sl_tp_mode == "atr":
+            strategy_title += f" + ATR SL {sl_atr_mult}x / TP {tp_atr_mult}x"
+        else:
+            strategy_title += f" + 고정 SL {sl_pct}% / TP {tp_pct}%"
+
     if HAS_VBT:
+        vbt_kwargs = {}
+        if use_sl_tp:
+            # 봉별 sl_stop/tp_stop 은 진입 캔들 값이 적용되며, 고가/저가 기준 장중 터치를 판정
+            vbt_kwargs = dict(
+                open=df['open'], high=df['high'], low=df['low'],
+                sl_stop=pd.Series(sl_frac, index=df.index),
+                tp_stop=pd.Series(tp_frac, index=df.index),
+            )
         pf = vbt.Portfolio.from_signals(
             close=df['close'],
             entries=entries,
             exits=exits,
             init_cash=init_cash,
             fees=fee_rate,
-            freq=tf
+            freq=tf,
+            **vbt_kwargs
         )
         summary, trades_df = extract_backtest_metrics(
             df=df, pf=pf, init_cash=init_cash, leverage=leverage, fee_rate=fee_rate
@@ -394,7 +517,8 @@ def run_strategy(
     else:
         summary, trades_df, pf = _simulate_signals_fallback(
             df=df, entries=entries, exits=exits,
-            init_cash=init_cash, leverage=leverage, fee_rate=fee_rate
+            init_cash=init_cash, leverage=leverage, fee_rate=fee_rate,
+            sl_frac=sl_frac, tp_frac=tp_frac
         )
 
     # 자산 증식 곡선: 시작 시점 초기 자본금 + 각 청산 시각의 누적 잔고
@@ -404,10 +528,24 @@ def run_strategy(
             pd.Series(trades_df["cumulative_equity"].values, index=pd.DatetimeIndex(trades_df["exit_timestamp"]))
         ])
         equity_curve = equity_curve[~equity_curve.index.duplicated(keep="last")]
+        trades_df["exit_reason"] = classify_exit_reasons(trades_df, df, sl_frac, tp_frac)
     else:
         equity_curve = pd.Series([init_cash, init_cash], index=[df.index[0], df.index[-1]])
 
-    print_backtest_report(strategy_title, summary, trades_df)
+    # 추가 성과 지표: 총수익률, 샤프지수, 프로핏 팩터, 청산 사유별 횟수
+    summary["total_return_pct"] = (summary["net_profit"] / init_cash) * 100.0 if init_cash > 0 else 0.0
+    summary["sharpe"] = compute_sharpe_ratio(equity_curve, df.index, tf)
+    loss_abs = abs(summary["total_gross_loss"])
+    summary["profit_factor"] = (summary["total_gross_profit"] / loss_abs) if loss_abs > 0 else (
+        float("inf") if summary["total_gross_profit"] > 0 else 0.0
+    )
+    reasons = trades_df["exit_reason"] if "exit_reason" in trades_df.columns else pd.Series(dtype=object)
+    summary["sl_exits"] = int((reasons == "SL").sum())
+    summary["tp_exits"] = int((reasons == "TP").sum())
+    summary["signal_exits"] = int((reasons == "Signal").sum())
+
+    if verbose:
+        print_backtest_report(strategy_title, summary, trades_df)
 
     return {
         "timeframe": tf,
@@ -424,6 +562,39 @@ def run_strategy(
 def run_youtube_bb_rsi_strategy(timeframe: str = "1h", **kwargs):
     """[하위 호환] 전략 1(볼린저 밴드 + RSI 역추세) 실행 래퍼."""
     return run_strategy(strategy=STRATEGY_BB_RSI, timeframe=timeframe, **kwargs)
+
+
+def run_all_strategies(timeframe: str = "1h", df_input: pd.DataFrame = None, csv_path: str = None, **kwargs):
+    """
+    3대 유튜브 전략을 동일한 데이터/타임프레임/비용/SL·TP 조건으로 모두 실행합니다.
+    반환: {strategy_key: run_strategy 결과 dict}
+    (kwargs 는 run_strategy 의 파라미터를 그대로 전달하며, 리포트 출력은 기본적으로 생략합니다.)
+    """
+    kwargs.setdefault("verbose", False)
+    return {
+        key: run_strategy(strategy=key, timeframe=timeframe, df_input=df_input, csv_path=csv_path, **kwargs)
+        for key in STRATEGY_LABELS
+    }
+
+
+def build_benchmark_table(results: dict) -> pd.DataFrame:
+    """run_all_strategies() 결과를 전략별 성과 비교 표(DataFrame, 숫자형)로 변환합니다."""
+    rows = []
+    for key, res in results.items():
+        s = res["summary"]
+        rows.append({
+            "전략": STRATEGY_LABELS[key],
+            "총수익률(%)": s["total_return_pct"],
+            "순손익($)": s["net_profit"],
+            "승률(%)": s["win_rate"],
+            "MDD(%)": s["mdd_pct"],
+            "총수수료($)": s["total_fees"],
+            "샤프지수": s["sharpe"],
+            "프로핏팩터": s["profit_factor"],
+            "거래횟수": s["total_trades"],
+            "SL/TP/시그널 청산": f"{s['sl_exits']}/{s['tp_exits']}/{s['signal_exits']}",
+        })
+    return pd.DataFrame(rows).set_index("전략")
 
 
 def run_strategy_benchmark(csv_1h="BTC_USDT_1h.csv", init_cash=10000.0, leverage=50.0, fee_rate=0.0004, freq='1h'):

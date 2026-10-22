@@ -247,6 +247,62 @@ sequenceDiagram
 
 ---
 
+### Phase 5: 리스크 관리(SL/TP) 및 멀티 전략 벤치마크 (완료)
+- [x] `backtest_engine.py`: ATR 변동성 기반 / 고정 % 기반 손절·익절 기능 추가 (`build_sl_tp_fractions`, `run_strategy(use_sl_tp=...)`)
+- [x] 청산 사유(`exit_reason`: `SL` / `TP` / `Signal` / `Open`) 분류 및 Trade Log 컬럼 추가 (`classify_exit_reasons`)
+- [x] 추가 성과 지표: 샤프지수, 프로핏 팩터, 총수익률, SL/TP/시그널 청산 횟수 (`summary`에 포함)
+- [x] 3대 전략 일괄 실행 `run_all_strategies()` 및 비교표 생성 `build_benchmark_table()` 구현
+- [x] `app.py`: 사이드바 SL/TP 적용 체크박스·방식 선택·배수/비율 슬라이더 연동
+- [x] `app.py`: 탭 구조 도입 — [탭 1: 단일 전략 상세 분석] / [탭 2: 3대 유튜브 전략 벤치마크 비교]
+- [ ] (다음 과제) 복리 포지션 사이징 및 강제청산(마진콜) 모델 도입, 트레일링 스탑, 다중 심볼 확장
+
+#### 5.A ATR 기반 SL/TP 계산 공식
+진입 캔들 $t$의 종가 $C_t$, ATR $A_t$ (`ATR_14`, Wilder 평활), 손절 배수 $k_{SL}$ (기본 `1.5`), 익절 배수 $k_{TP}$ (기본 `3.0`)일 때, 포지션이 청산될 때까지 아래 가격이 **진입 시점 값으로 고정**됩니다.
+
+$$P_{SL} = C_t - k_{SL}\cdot A_t, \qquad P_{TP} = C_t + k_{TP}\cdot A_t$$
+
+$$\text{SL 폭(비율)} = \frac{k_{SL}\cdot A_t}{C_t}, \qquad \text{TP 폭(비율)} = \frac{k_{TP}\cdot A_t}{C_t}$$
+
+- **보상 대비 위험 비율(R:R)** $= k_{TP} / k_{SL}$ (기본값 $3.0/1.5 = 2.0$). 손익분기 승률(수수료 제외) $= \dfrac{1}{1 + R{:}R}$ ≈ 33.3%.
+- **고정 % 모드**: $P_{SL} = C_t(1 - s)$, $P_{TP} = C_t(1 + p)$ (`sl_pct = s×100`, `tp_pct = p×100`, 기본 2% / 4%).
+- **레버리지 관계**: SL/TP는 **1배수 가격 변동 기준**이며 레버리지 $L$ 적용 시 자본 대비 손익은 $L$배 (예: 5x, 손절 2% → 자본의 −10%). 사이드바에 환산값이 표시됩니다.
+- **체결 규칙** (장중 고가/저가 기준, 캔들 $j > t$):
+  1. $L_j \le P_{SL}$ → 손절가 $P_{SL}$ 에 체결 (`exit_reason = SL`)
+  2. 아니면 $H_j \ge P_{TP}$ → 익절가 $P_{TP}$ 에 체결 (`TP`)
+  3. 아니면 전략 청산 시그널 발생 시 해당 캔들 종가 체결 (`Signal`)
+  - 같은 캔들에서 SL·TP가 모두 터치되면 순서를 알 수 없으므로 **보수적으로 손절 우선**(폴백 엔진 기준). `vectorbt` 사용 시 `open/high/low` + 봉별 `sl_stop`/`tp_stop` 시리즈를 전달하며, 진입 캔들의 값이 포지션에 적용됩니다.
+  - SL/TP 미적용 시에는 기존과 동일하게 전략 시그널만으로 청산됩니다.
+- **참고(효과)**: SL이 적용되면 손절 직후 진입 조건이 다시 성립할 때 재진입이 발생해 거래 수·수수료가 늘어날 수 있습니다. 특히 역추세 전략(전략 1)은 하락 추세에서 손절이 반복되어 성과가 악화될 수 있으므로 벤치마크 탭에서 `SL/TP/시그널 청산` 횟수를 함께 확인합니다.
+
+#### 5.B 추가 성과 지표 수식
+- **샤프지수(연환산)**: 실현 잔고 곡선을 봉 인덱스로 전방채움한 뒤 초기 자본금 대비 봉별 손익률 $r_i = \Delta E_i / C_0$ 로 환산
+  $$\text{Sharpe} = \frac{\bar r}{\sigma_r}\sqrt{N}, \qquad N = 8{,}760\ (\text{1h}),\ 2{,}190\ (\text{4h}),\quad \text{무위험수익률}=0,\ \sigma_r:\ \text{표본표준편차}(ddof=1)$$
+  (거래당 고정 명목금액 모델이므로 잔고가 음수여도 안정적. 변동이 없으면 0)
+- **프로핏 팩터**: $\text{PF} = \dfrac{\text{Total Gross Profit}}{|\text{Total Gross Loss}|}$ (손실 0이면 `∞`)
+- **총수익률(%)**: $\dfrac{\text{Net Profit}}{C_0} \times 100$
+- **Trade Log 신규 컬럼**: `exit_reason` (`SL` / `TP` / `Signal` / `Open`)
+
+#### 5.C 멀티 전략 벤치마크 구조
+
+```mermaid
+flowchart TD
+    UI["app.py 사이드바<br/>(타임프레임, 비용, 레버리지, SL/TP, 전략 파라미터)"] --> RA["run_all_strategies()"]
+    RA --> S1["run_strategy('bb_rsi')"]
+    RA --> S2["run_strategy('ema_macd')"]
+    RA --> S3["run_strategy('bb_squeeze')"]
+    S1 & S2 & S3 --> R["results: {strategy: summary, trades, equity_curve, data}"]
+    R --> T1["탭 1: results[선택 전략] 상세 분석<br/>(KPI 카드, 캔들/타점, RSI·MACD, Equity Curve, Trade Log)"]
+    R --> BT["build_benchmark_table(results)"]
+    BT --> T2["탭 2: 비교표 + 최우수 카드 + 누적수익률 곡선 + CSV"]
+```
+
+- **공정 비교 원칙**: 3개 전략을 **동일한 원본 데이터·타임프레임·초기자본·수수료·레버리지·SL/TP 설정**으로 단 한 번 실행하고(`run_all_strategies`), 그 결과를 탭 1(선택 전략 상세)과 탭 2(비교)가 **공유**하므로 중복 연산이 없습니다. 리포트 콘솔 출력은 `verbose=False`로 생략합니다.
+- **비교표 컬럼** (`build_benchmark_table`): 총수익률(%), 순손익($), 승률(%), MDD(%), 총수수료($), 샤프지수, 프로핏팩터, 거래횟수, SL/TP/시그널 청산 횟수.
+- **탭 2 구성**: ① 최고 총수익률 / 최고 샤프 / 최소 MDD 전략 카드(거래 0건 전략 제외) ② 비교 표 ③ 비교표 CSV 다운로드 ④ 전략별 누적 수익률(%) 계단형 곡선 오버레이.
+- **한계**: 현재 모델은 거래당 고정 명목금액(초기자본×레버리지)을 사용하며 복리·강제청산을 반영하지 않으므로, 고레버리지 + 손실 누적 시 잔고/MDD가 −100%를 넘을 수 있습니다(해석 시 주의).
+
+---
+
 ## 7. 변경 이력 (Changelog)
 
 | 날짜 | 작업자 | 대상 파일 | 변경 요약 |
@@ -256,3 +312,4 @@ sequenceDiagram
 | 2026-10-22 | Antigravity | `app.py`, `DEVLOG.md` | `app.py`를 백테스팅 전용 완성형 대시보드로 전면 개편(1H/4H 자동 수집·변환, 보조지표 토글, 파라미터 슬라이더, 6대 KPI 카드, 진입/청산 마커 캔들차트 & RSI/MACD 서브차트, Trade Log 및 CSV 다운로드) 및 `DEVLOG.md` Phase 4 문서화 완료 |
 | 2026-10-22 | Antigravity | `indicators.py`, `DEVLOG.md` | `get_bbands()` 내 볼린저 밴드 표준편차 연산 시 `NDFrame.rolling()`의 `ddof` 인자 위치 오류 수정 (`series.rolling(window=length).std(ddof=0)`) |
 | 2026-10-22 | Antigravity | `strategies.py`(신규), `backtest_engine.py`, `indicators.py`, `app.py`, `DEVLOG.md` | 유튜브 전략 2(EMA200+MACD 골든크로스)·전략 3(BB 스퀴즈+거래량 돌파) 추가, 통합 실행기 `run_strategy()` 도입, `EMA_200`/`VOL_SMA_20` 지표 추가, 사이드바 전략 선택 드롭다운 및 자산 증식 곡선 차트 연동 |
+| 2026-10-22 | Antigravity | `backtest_engine.py`, `app.py`, `DEVLOG.md` | ATR/고정% SL·TP 리스크 관리(`build_sl_tp_fractions`, `exit_reason`), 샤프지수·프로핏팩터 추가, `run_all_strategies`/`build_benchmark_table` 및 탭 1(단일 전략)·탭 2(3대 전략 벤치마크) 구조 도입, 사이드바 SL/TP 슬라이더 연동 |

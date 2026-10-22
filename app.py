@@ -9,7 +9,9 @@ from data_fetcher import fetch_extensive_binance_data
 from backtest_engine import (
     load_timeframe_data,
     resample_ohlcv,
-    run_strategy
+    run_strategy,
+    run_all_strategies,
+    build_benchmark_table
 )
 from strategies import (
     STRATEGY_BB_RSI,
@@ -154,6 +156,33 @@ rsi_oversold, rsi_overbought = st.sidebar.slider(
     help="볼린저 하단 터치 + RSI 과매도 이하 반등 시 롱 진입 / 볼린저 상단 터치 또는 RSI 과매수 이상 도달 시 청산"
 )
 
+st.sidebar.markdown("---")
+
+# [1-4] 리스크 관리 (손절 / 익절)
+st.sidebar.subheader("🛡️ 리스크 관리 (손절 / 익절)")
+use_sl_tp = st.sidebar.checkbox(
+    "손절/익절(SL/TP) 적용",
+    value=False,
+    help="켜면 전략의 청산 시그널과 별개로, 진입가 기준 SL/TP 가격에 먼저 닿는 쪽으로 청산됩니다. (캔들 고가/저가 기준 장중 터치 판정)"
+)
+sl_tp_mode_label = st.sidebar.radio(
+    "SL/TP 산출 방식",
+    options=["ATR 변동성 기반", "고정 % 기반"],
+    index=0,
+    disabled=not use_sl_tp,
+    horizontal=True
+)
+sl_tp_mode = "atr" if sl_tp_mode_label.startswith("ATR") else "pct"
+sl_atr_mult, tp_atr_mult, sl_pct, tp_pct = 1.5, 3.0, 2.0, 4.0
+if sl_tp_mode == "atr":
+    sl_atr_mult = st.sidebar.slider("손절 배수 (× ATR)", min_value=0.5, max_value=5.0, value=1.5, step=0.1, disabled=not use_sl_tp)
+    tp_atr_mult = st.sidebar.slider("익절 배수 (× ATR)", min_value=0.5, max_value=10.0, value=3.0, step=0.1, disabled=not use_sl_tp)
+    st.sidebar.caption("손절가 = 진입가 − 손절배수 × ATR(14) / 익절가 = 진입가 + 익절배수 × ATR(14)")
+else:
+    sl_pct = st.sidebar.slider("손절 (%) - 1배수 가격 기준", min_value=0.5, max_value=20.0, value=2.0, step=0.5, disabled=not use_sl_tp)
+    tp_pct = st.sidebar.slider("익절 (%) - 1배수 가격 기준", min_value=0.5, max_value=40.0, value=4.0, step=0.5, disabled=not use_sl_tp)
+    st.sidebar.caption(f"레버리지 {leverage}x 적용 시 자본 대비 손절 ≈ {sl_pct * leverage:.1f}% / 익절 ≈ {tp_pct * leverage:.1f}%")
+
 with st.sidebar.expander("🔧 세부 지표 주기 및 차트 표시 설정", expanded=False):
     bb_length = st.number_input("볼린저 밴드 기간 (Length)", min_value=5, max_value=100, value=20, step=1)
     bb_std = st.number_input("볼린저 밴드 표준편차 (Std)", min_value=0.5, max_value=5.0, value=2.0, step=0.1)
@@ -187,17 +216,24 @@ STRATEGY_DESCRIPTIONS = {
         f"거래량 ≥ 20봉 평균의 `{vol_mult}`배 돌파 롱 진입 / 종가 < BB 중단 청산"
     ),
 }
+if not use_sl_tp:
+    risk_desc = "OFF"
+elif sl_tp_mode == "atr":
+    risk_desc = f"ATR SL `{sl_atr_mult}x` / TP `{tp_atr_mult}x`"
+else:
+    risk_desc = f"고정 SL `{sl_pct}%` / TP `{tp_pct}%`"
 st.caption(
     f"**적용 전략:** {STRATEGY_LABELS[selected_strategy]} — {STRATEGY_DESCRIPTIONS[selected_strategy]} | "
+    f"**SL/TP:** {risk_desc} | "
     f"**타임프레임:** `{selected_tf.upper()}` | **초기 자본금:** `${init_cash:,.0f}` | "
     f"**수수료율:** `{fee_pct:.2f}%` | **레버리지:** `{leverage}x`"
 )
 
 try:
-    with st.spinner(f"BTCUSDT ({selected_tf.upper()}) 데이터 준비 및 백테스팅 시뮬레이션 연산 중..."):
+    with st.spinner(f"BTCUSDT ({selected_tf.upper()}) 데이터 준비 및 3대 전략 백테스팅 시뮬레이션 연산 중..."):
         raw_df = ensure_and_load_ohlcv(selected_tf)
-        bt_result = run_strategy(
-            strategy=selected_strategy,
+        # 동일 데이터/타임프레임/비용/SL·TP 조건으로 3대 전략을 한 번에 실행 (탭 1·탭 2 공용)
+        results = run_all_strategies(
             timeframe=selected_tf,
             df_input=raw_df,
             vol_mult=float(vol_mult),
@@ -210,387 +246,464 @@ try:
             init_cash=float(init_cash),
             leverage=float(leverage),
             fee_rate=float(fee_rate),
-            strict_rebound=bool(strict_rebound)
+            strict_rebound=bool(strict_rebound),
+            use_sl_tp=bool(use_sl_tp),
+            sl_tp_mode=sl_tp_mode,
+            sl_atr_mult=float(sl_atr_mult),
+            tp_atr_mult=float(tp_atr_mult),
+            sl_pct=float(sl_pct),
+            tp_pct=float(tp_pct)
+        )
+    bt_result = results[selected_strategy]
+
+    tab1, tab2 = st.tabs(["🔍 탭 1: 단일 전략 상세 분석", "🏁 탭 2: 3대 유튜브 전략 벤치마크 비교"])
+
+    with tab1:
+        df = bt_result["data"]
+        summary = bt_result["summary"]
+        trades_df = bt_result["trades"]
+
+        total_return_pct = (summary["net_profit"] / init_cash) * 100.0 if init_cash > 0 else 0.0
+
+        # ==========================================================================
+        # 3. 상단 요약 카드 (KPI Metrics Row)
+        # ==========================================================================
+        st.subheader("📌 백테스팅 핵심 성과 요약 (Performance Metrics)")
+        m1, m2, m3, m4, m5, m6 = st.columns(6)
+
+        m1.metric(
+            label="총 수익률 (Total Return)",
+            value=f"{total_return_pct:+.2f}%",
+            delta=f"순손익 ${summary['net_profit']:+,.2f}"
+        )
+        m2.metric(
+            label="총 수익금 (Gross Profit)",
+            value=f"+${summary['total_gross_profit']:,.2f}",
+            delta=f"승리 {summary['winning_trades']}회"
+        )
+        m3.metric(
+            label="총 손실금 (Gross Loss)",
+            value=f"-${abs(summary['total_gross_loss']):,.2f}",
+            delta=f"패배 {summary['losing_trades']}회",
+            delta_color="inverse"
+        )
+        m4.metric(
+            label="총 지불 수수료 (Fees)",
+            value=f"${summary['total_fees']:,.2f}",
+            delta=f"편도 {fee_pct:.2f}% × {leverage}x",
+            delta_color="off"
+        )
+        m5.metric(
+            label="승률 (Win Rate)",
+            value=f"{summary['win_rate']:.2f}%",
+            delta=f"총 {summary['total_trades']}회 진입",
+            delta_color="off"
+        )
+        m6.metric(
+            label="최대 낙폭 (MDD)",
+            value=f"{summary['mdd_pct']:.2f}%",
+            delta=f"최종자산 ${summary['final_equity']:,.2f}",
+            delta_color="inverse"
         )
 
-    df = bt_result["data"]
-    summary = bt_result["summary"]
-    trades_df = bt_result["trades"]
+        st.markdown("---")
 
-    total_return_pct = (summary["net_profit"] / init_cash) * 100.0 if init_cash > 0 else 0.0
+        # ==========================================================================
+        # 4. 메인 캔들차트 (진입/청산 마커 + BB/MA 오버레이) & 서브 차트 (RSI / MACD)
+        # ==========================================================================
+        st.subheader("📈 인터랙티브 캔들차트 & 매매 타점 / 보조지표 연동 뷰")
 
-    # ==========================================================================
-    # 3. 상단 요약 카드 (KPI Metrics Row)
-    # ==========================================================================
-    st.subheader("📌 백테스팅 핵심 성과 요약 (Performance Metrics)")
-    m1, m2, m3, m4, m5, m6 = st.columns(6)
+        plot_df = df.tail(max_chart_candles).copy()
+        plot_start_ts = plot_df.index[0]
 
-    m1.metric(
-        label="총 수익률 (Total Return)",
-        value=f"{total_return_pct:+.2f}%",
-        delta=f"순손익 ${summary['net_profit']:+,.2f}"
-    )
-    m2.metric(
-        label="총 수익금 (Gross Profit)",
-        value=f"+${summary['total_gross_profit']:,.2f}",
-        delta=f"승리 {summary['winning_trades']}회"
-    )
-    m3.metric(
-        label="총 손실금 (Gross Loss)",
-        value=f"-${abs(summary['total_gross_loss']):,.2f}",
-        delta=f"패배 {summary['losing_trades']}회",
-        delta_color="inverse"
-    )
-    m4.metric(
-        label="총 지불 수수료 (Fees)",
-        value=f"${summary['total_fees']:,.2f}",
-        delta=f"편도 {fee_pct:.2f}% × {leverage}x",
-        delta_color="off"
-    )
-    m5.metric(
-        label="승률 (Win Rate)",
-        value=f"{summary['win_rate']:.2f}%",
-        delta=f"총 {summary['total_trades']}회 진입",
-        delta_color="off"
-    )
-    m6.metric(
-        label="최대 낙폭 (MDD)",
-        value=f"{summary['mdd_pct']:.2f}%",
-        delta=f"최종자산 ${summary['final_equity']:,.2f}",
-        delta_color="inverse"
-    )
+        # 활성화된 서브 차트 개수 동적 계산
+        sub_panels = []
+        if show_rsi:
+            sub_panels.append("RSI")
+        if show_macd:
+            sub_panels.append("MACD")
 
-    st.markdown("---")
+        num_rows = 1 + len(sub_panels)
+        if num_rows == 3:
+            row_heights = [0.58, 0.21, 0.21]
+        elif num_rows == 2:
+            row_heights = [0.72, 0.28]
+        else:
+            row_heights = [1.0]
 
-    # ==========================================================================
-    # 4. 메인 캔들차트 (진입/청산 마커 + BB/MA 오버레이) & 서브 차트 (RSI / MACD)
-    # ==========================================================================
-    st.subheader("📈 인터랙티브 캔들차트 & 매매 타점 / 보조지표 연동 뷰")
+        subplot_titles = [f"BTC/USDT ({selected_tf.upper()}) 캔들차트 & 매매 타점"]
+        for panel in sub_panels:
+            if panel == "RSI":
+                subplot_titles.append(f"RSI ({rsi_length}) [과매도: {rsi_oversold} / 과매수: {rsi_overbought}]")
+            elif panel == "MACD":
+                subplot_titles.append("MACD (12, 26, 9)")
 
-    plot_df = df.tail(max_chart_candles).copy()
-    plot_start_ts = plot_df.index[0]
-
-    # 활성화된 서브 차트 개수 동적 계산
-    sub_panels = []
-    if show_rsi:
-        sub_panels.append("RSI")
-    if show_macd:
-        sub_panels.append("MACD")
-
-    num_rows = 1 + len(sub_panels)
-    if num_rows == 3:
-        row_heights = [0.58, 0.21, 0.21]
-    elif num_rows == 2:
-        row_heights = [0.72, 0.28]
-    else:
-        row_heights = [1.0]
-
-    subplot_titles = [f"BTC/USDT ({selected_tf.upper()}) 캔들차트 & 매매 타점"]
-    for panel in sub_panels:
-        if panel == "RSI":
-            subplot_titles.append(f"RSI ({rsi_length}) [과매도: {rsi_oversold} / 과매수: {rsi_overbought}]")
-        elif panel == "MACD":
-            subplot_titles.append("MACD (12, 26, 9)")
-
-    fig = make_subplots(
-        rows=num_rows,
-        cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.04,
-        row_heights=row_heights,
-        subplot_titles=subplot_titles
-    )
-
-    # [Row 1] 메인 캔들차트
-    fig.add_trace(
-        go.Candlestick(
-            x=plot_df.index,
-            open=plot_df["open"],
-            high=plot_df["high"],
-            low=plot_df["low"],
-            close=plot_df["close"],
-            name="BTC/USDT",
-            increasing_line_color="#26a69a",
-            decreasing_line_color="#ef5350"
-        ),
-        row=1, col=1
-    )
-
-    # [Row 1 오버레이] 이동평균선 (SMA 20 / EMA 50)
-    if show_ma:
-        sma_col = next((c for c in plot_df.columns if c.startswith("SMA_")), None)
-        ema_col = next((c for c in plot_df.columns if c.startswith("EMA_")), None)
-        if sma_col:
-            fig.add_trace(
-                go.Scatter(
-                    x=plot_df.index,
-                    y=plot_df[sma_col],
-                    mode="lines",
-                    name=sma_col,
-                    line=dict(color="#ffca28", width=1.5)
-                ),
-                row=1, col=1
-            )
-        if ema_col:
-            fig.add_trace(
-                go.Scatter(
-                    x=plot_df.index,
-                    y=plot_df[ema_col],
-                    mode="lines",
-                    name=ema_col,
-                    line=dict(color="#29b6f6", width=1.5)
-                ),
-                row=1, col=1
-            )
-        # 전략 2 선택 시 추세 필터 EMA 200 추가 표시
-        if selected_strategy == STRATEGY_EMA_MACD and "EMA_200" in plot_df.columns:
-            fig.add_trace(
-                go.Scatter(
-                    x=plot_df.index,
-                    y=plot_df["EMA_200"],
-                    mode="lines",
-                    name="EMA_200 (추세 필터)",
-                    line=dict(color="#ff7043", width=2)
-                ),
-                row=1, col=1
-            )
-
-    # [Row 1 오버레이] 볼린저 밴드 (상단, 중단, 하단)
-    if show_bb and {"BB_Upper", "BB_Middle", "BB_Lower"}.issubset(plot_df.columns):
-        fig.add_trace(
-            go.Scatter(
-                x=plot_df.index,
-                y=plot_df["BB_Upper"],
-                mode="lines",
-                name="BB Upper",
-                line=dict(color="rgba(171, 71, 188, 0.75)", width=1.2, dash="dot")
-            ),
-            row=1, col=1
+        fig = make_subplots(
+            rows=num_rows,
+            cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.04,
+            row_heights=row_heights,
+            subplot_titles=subplot_titles
         )
+
+        # [Row 1] 메인 캔들차트
         fig.add_trace(
-            go.Scatter(
+            go.Candlestick(
                 x=plot_df.index,
-                y=plot_df["BB_Lower"],
-                mode="lines",
-                name="BB Lower",
-                fill="tonexty",
-                fillcolor="rgba(171, 71, 188, 0.08)",
-                line=dict(color="rgba(171, 71, 188, 0.75)", width=1.2, dash="dot")
-            ),
-            row=1, col=1
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=plot_df.index,
-                y=plot_df["BB_Middle"],
-                mode="lines",
-                name="BB Middle",
-                line=dict(color="rgba(206, 147, 216, 0.6)", width=1.0, dash="dash")
+                open=plot_df["open"],
+                high=plot_df["high"],
+                low=plot_df["low"],
+                close=plot_df["close"],
+                name="BTC/USDT",
+                increasing_line_color="#26a69a",
+                decreasing_line_color="#ef5350"
             ),
             row=1, col=1
         )
 
-    # [Row 1 오버레이] 롱 진입(초록색 위 화살표) & 청산(X 마커) 타점 시각화
-    if len(trades_df) > 0:
-        visible_entries = trades_df[trades_df["entry_timestamp"] >= plot_start_ts]
-        visible_exits = trades_df[trades_df["exit_timestamp"] >= plot_start_ts]
-
-        if len(visible_entries) > 0:
-            fig.add_trace(
-                go.Scatter(
-                    x=visible_entries["entry_timestamp"],
-                    y=visible_entries["entry_price"] * 0.996,
-                    mode="markers",
-                    name="Long 진입 (Entry)",
-                    marker=dict(
-                        symbol="triangle-up",
-                        size=13,
-                        color="#00e676",
-                        line=dict(color="#ffffff", width=1)
+        # [Row 1 오버레이] 이동평균선 (SMA 20 / EMA 50)
+        if show_ma:
+            sma_col = next((c for c in plot_df.columns if c.startswith("SMA_")), None)
+            ema_col = next((c for c in plot_df.columns if c.startswith("EMA_")), None)
+            if sma_col:
+                fig.add_trace(
+                    go.Scatter(
+                        x=plot_df.index,
+                        y=plot_df[sma_col],
+                        mode="lines",
+                        name=sma_col,
+                        line=dict(color="#ffca28", width=1.5)
                     ),
-                    customdata=np.stack([
-                        visible_entries["trade_id"],
-                        visible_entries["entry_price"]
-                    ], axis=-1),
-                    hovertemplate=(
-                        "<b>🟢 Long 진입 (#%{customdata[0]})</b><br>"
-                        "시각: %{x}<br>"
-                        "진입 단가: $%{customdata[1]:,.2f}<extra></extra>"
-                    )
-                ),
-                row=1, col=1
-            )
+                    row=1, col=1
+                )
+            if ema_col:
+                fig.add_trace(
+                    go.Scatter(
+                        x=plot_df.index,
+                        y=plot_df[ema_col],
+                        mode="lines",
+                        name=ema_col,
+                        line=dict(color="#29b6f6", width=1.5)
+                    ),
+                    row=1, col=1
+                )
+            # 전략 2 선택 시 추세 필터 EMA 200 추가 표시
+            if selected_strategy == STRATEGY_EMA_MACD and "EMA_200" in plot_df.columns:
+                fig.add_trace(
+                    go.Scatter(
+                        x=plot_df.index,
+                        y=plot_df["EMA_200"],
+                        mode="lines",
+                        name="EMA_200 (추세 필터)",
+                        line=dict(color="#ff7043", width=2)
+                    ),
+                    row=1, col=1
+                )
 
-        if len(visible_exits) > 0:
+        # [Row 1 오버레이] 볼린저 밴드 (상단, 중단, 하단)
+        if show_bb and {"BB_Upper", "BB_Middle", "BB_Lower"}.issubset(plot_df.columns):
             fig.add_trace(
                 go.Scatter(
-                    x=visible_exits["exit_timestamp"],
-                    y=visible_exits["exit_price"] * 1.004,
-                    mode="markers",
-                    name="포지션 청산 (Exit)",
-                    marker=dict(
-                        symbol="x",
-                        size=11,
-                        color="#ff5252",
-                        line=dict(color="#ffffff", width=1)
-                    ),
-                    customdata=np.stack([
-                        visible_exits["trade_id"],
-                        visible_exits["exit_price"],
-                        visible_exits["net_return_pct"],
-                        visible_exits["net_pnl"],
-                        visible_exits["fee_paid"]
-                    ], axis=-1),
-                    hovertemplate=(
-                        "<b>❌ 포지션 청산 (#%{customdata[0]})</b><br>"
-                        "시각: %{x}<br>"
-                        "청산 단가: $%{customdata[1]:,.2f}<br>"
-                        "순수익률: %{customdata[2]:+.2f}%<br>"
-                        "순손익금: $%{customdata[3]:+,.2f} (수수료: $%{customdata[4]:,.2f})<extra></extra>"
-                    )
+                    x=plot_df.index,
+                    y=plot_df["BB_Upper"],
+                    mode="lines",
+                    name="BB Upper",
+                    line=dict(color="rgba(171, 71, 188, 0.75)", width=1.2, dash="dot")
+                ),
+                row=1, col=1
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=plot_df.index,
+                    y=plot_df["BB_Lower"],
+                    mode="lines",
+                    name="BB Lower",
+                    fill="tonexty",
+                    fillcolor="rgba(171, 71, 188, 0.08)",
+                    line=dict(color="rgba(171, 71, 188, 0.75)", width=1.2, dash="dot")
+                ),
+                row=1, col=1
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=plot_df.index,
+                    y=plot_df["BB_Middle"],
+                    mode="lines",
+                    name="BB Middle",
+                    line=dict(color="rgba(206, 147, 216, 0.6)", width=1.0, dash="dash")
                 ),
                 row=1, col=1
             )
 
-    # [서브 차트 연동] RSI 및 MACD
-    current_row = 2
-    if show_rsi and "RSI" in plot_df.columns:
-        fig.add_trace(
-            go.Scatter(
-                x=plot_df.index,
-                y=plot_df["RSI"],
-                mode="lines",
-                name=f"RSI ({rsi_length})",
-                line=dict(color="#b388ff", width=1.6)
-            ),
-            row=current_row, col=1
-        )
-        fig.add_hline(
-            y=rsi_overbought, line_dash="dash", line_color="#ff5252",
-            annotation_text=f"과매수 ({rsi_overbought})", row=current_row, col=1
-        )
-        fig.add_hline(
-            y=rsi_oversold, line_dash="dash", line_color="#00e676",
-            annotation_text=f"과매도 ({rsi_oversold})", row=current_row, col=1
-        )
-        fig.update_yaxes(range=[0, 100], row=current_row, col=1)
-        current_row += 1
+        # [Row 1 오버레이] 롱 진입(초록색 위 화살표) & 청산(X 마커) 타점 시각화
+        if len(trades_df) > 0:
+            visible_entries = trades_df[trades_df["entry_timestamp"] >= plot_start_ts]
+            visible_exits = trades_df[trades_df["exit_timestamp"] >= plot_start_ts]
 
-    if show_macd and {"MACD_Line", "MACD_Signal", "MACD_Hist"}.issubset(plot_df.columns):
-        hist_colors = np.where(plot_df["MACD_Hist"] >= 0, "#26a69a", "#ef5350")
-        fig.add_trace(
-            go.Bar(
-                x=plot_df.index,
-                y=plot_df["MACD_Hist"],
-                name="MACD Hist",
-                marker_color=hist_colors
-            ),
-            row=current_row, col=1
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=plot_df.index,
-                y=plot_df["MACD_Line"],
-                mode="lines",
-                name="MACD Line",
-                line=dict(color="#42a5f5", width=1.4)
-            ),
-            row=current_row, col=1
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=plot_df.index,
-                y=plot_df["MACD_Signal"],
-                mode="lines",
-                name="Signal Line",
-                line=dict(color="#ffa726", width=1.4)
-            ),
-            row=current_row, col=1
-        )
+            if len(visible_entries) > 0:
+                fig.add_trace(
+                    go.Scatter(
+                        x=visible_entries["entry_timestamp"],
+                        y=visible_entries["entry_price"] * 0.996,
+                        mode="markers",
+                        name="Long 진입 (Entry)",
+                        marker=dict(
+                            symbol="triangle-up",
+                            size=13,
+                            color="#00e676",
+                            line=dict(color="#ffffff", width=1)
+                        ),
+                        customdata=np.stack([
+                            visible_entries["trade_id"],
+                            visible_entries["entry_price"]
+                        ], axis=-1),
+                        hovertemplate=(
+                            "<b>🟢 Long 진입 (#%{customdata[0]})</b><br>"
+                            "시각: %{x}<br>"
+                            "진입 단가: $%{customdata[1]:,.2f}<extra></extra>"
+                        )
+                    ),
+                    row=1, col=1
+                )
 
-    chart_height = 550 if num_rows == 1 else (720 if num_rows == 2 else 880)
-    fig.update_layout(
-        template="plotly_dark",
-        height=chart_height,
-        hovermode="x unified",
-        xaxis_rangeslider_visible=False,
-        margin=dict(l=20, r=20, t=40, b=20),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-    )
-    st.plotly_chart(fig, use_container_width=True)
+            if len(visible_exits) > 0:
+                fig.add_trace(
+                    go.Scatter(
+                        x=visible_exits["exit_timestamp"],
+                        y=visible_exits["exit_price"] * 1.004,
+                        mode="markers",
+                        name="포지션 청산 (Exit)",
+                        marker=dict(
+                            symbol="x",
+                            size=11,
+                            color="#ff5252",
+                            line=dict(color="#ffffff", width=1)
+                        ),
+                        customdata=np.stack([
+                            visible_exits["trade_id"],
+                            visible_exits["exit_price"],
+                            visible_exits["net_return_pct"],
+                            visible_exits["net_pnl"],
+                            visible_exits["fee_paid"]
+                        ], axis=-1),
+                        hovertemplate=(
+                            "<b>❌ 포지션 청산 (#%{customdata[0]})</b><br>"
+                            "시각: %{x}<br>"
+                            "청산 단가: $%{customdata[1]:,.2f}<br>"
+                            "순수익률: %{customdata[2]:+.2f}%<br>"
+                            "순손익금: $%{customdata[3]:+,.2f} (수수료: $%{customdata[4]:,.2f})<extra></extra>"
+                        )
+                    ),
+                    row=1, col=1
+                )
 
-    # 자산 증식 곡선 (Equity Curve): 메인 차트 바로 아래 상시 표시
-    st.subheader("💹 자산 증식 곡선 (Equity Curve)")
-    if len(trades_df) > 0:
-        equity_curve = bt_result["equity_curve"]
-        final_equity = float(equity_curve.iloc[-1])
-        line_color = "#00e676" if final_equity >= init_cash else "#ff5252"
-        eq_fig = go.Figure()
-        eq_fig.add_trace(
-            go.Scatter(
-                x=equity_curve.index,
-                y=equity_curve.values,
-                mode="lines+markers",
-                line=dict(color=line_color, width=2, shape="hv"),
-                marker=dict(size=4),
-                name="계좌 잔고 (USDT)",
-                hovertemplate="시각: %{x}<br>잔고: $%{y:,.2f}<extra></extra>"
+        # [서브 차트 연동] RSI 및 MACD
+        current_row = 2
+        if show_rsi and "RSI" in plot_df.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=plot_df.index,
+                    y=plot_df["RSI"],
+                    mode="lines",
+                    name=f"RSI ({rsi_length})",
+                    line=dict(color="#b388ff", width=1.6)
+                ),
+                row=current_row, col=1
             )
-        )
-        eq_fig.add_hline(y=init_cash, line_dash="dash", line_color="#9e9e9e", annotation_text="초기 자본금")
-        eq_fig.update_layout(
+            fig.add_hline(
+                y=rsi_overbought, line_dash="dash", line_color="#ff5252",
+                annotation_text=f"과매수 ({rsi_overbought})", row=current_row, col=1
+            )
+            fig.add_hline(
+                y=rsi_oversold, line_dash="dash", line_color="#00e676",
+                annotation_text=f"과매도 ({rsi_oversold})", row=current_row, col=1
+            )
+            fig.update_yaxes(range=[0, 100], row=current_row, col=1)
+            current_row += 1
+
+        if show_macd and {"MACD_Line", "MACD_Signal", "MACD_Hist"}.issubset(plot_df.columns):
+            hist_colors = np.where(plot_df["MACD_Hist"] >= 0, "#26a69a", "#ef5350")
+            fig.add_trace(
+                go.Bar(
+                    x=plot_df.index,
+                    y=plot_df["MACD_Hist"],
+                    name="MACD Hist",
+                    marker_color=hist_colors
+                ),
+                row=current_row, col=1
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=plot_df.index,
+                    y=plot_df["MACD_Line"],
+                    mode="lines",
+                    name="MACD Line",
+                    line=dict(color="#42a5f5", width=1.4)
+                ),
+                row=current_row, col=1
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=plot_df.index,
+                    y=plot_df["MACD_Signal"],
+                    mode="lines",
+                    name="Signal Line",
+                    line=dict(color="#ffa726", width=1.4)
+                ),
+                row=current_row, col=1
+            )
+
+        chart_height = 550 if num_rows == 1 else (720 if num_rows == 2 else 880)
+        fig.update_layout(
             template="plotly_dark",
-            height=320,
-            margin=dict(l=20, r=20, t=30, b=20),
-            yaxis_title="USDT",
-            hovermode="x unified"
+            height=chart_height,
+            hovermode="x unified",
+            xaxis_rangeslider_visible=False,
+            margin=dict(l=20, r=20, t=40, b=20),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
         )
-        st.plotly_chart(eq_fig, use_container_width=True)
-    else:
-        st.info("거래 내역이 없어 자산 증식 곡선을 표시할 수 없습니다.")
+        st.plotly_chart(fig, use_container_width=True)
 
-    st.markdown("---")
-
-    # ==========================================================================
-    # 5. 하단 상세 매매 기록 (Trade Log 테이블 및 CSV 다운로드 버튼)
-    # ==========================================================================
-    st.subheader("📋 상세 매매 기록 (Trade Log)")
-
-    if len(trades_df) > 0:
-        display_log = trades_df.rename(columns={
-            "trade_id": "거래번호",
-            "entry_timestamp": "진입 시각 (Entry Time)",
-            "exit_timestamp": "청산 시각 (Exit Time)",
-            "direction": "포지션",
-            "entry_price": "진입가 (USDT)",
-            "exit_price": "청산가 (USDT)",
-            "gross_return_pct": "수수료전 수익률 (%)",
-            "fee_paid": "지불 수수료 (USDT)",
-            "net_return_pct": "최종 수익률 (%)",
-            "net_pnl": "실현 손익금 (USDT)",
-            "cumulative_equity": "누적 잔고 (USDT)",
-            "status": "상태"
-        })
-
-        col_info, col_btn = st.columns([3, 1])
-        with col_info:
-            st.markdown(
-                f"총 **{len(trades_df):,}건**의 매매가 기록되었습니다. "
-                f"(전체 테스트 구간: `{df.index[0]}` ~ `{df.index[-1]}`)"
+        # 자산 증식 곡선 (Equity Curve): 메인 차트 바로 아래 상시 표시
+        st.subheader("💹 자산 증식 곡선 (Equity Curve)")
+        if len(trades_df) > 0:
+            equity_curve = bt_result["equity_curve"]
+            final_equity = float(equity_curve.iloc[-1])
+            line_color = "#00e676" if final_equity >= init_cash else "#ff5252"
+            eq_fig = go.Figure()
+            eq_fig.add_trace(
+                go.Scatter(
+                    x=equity_curve.index,
+                    y=equity_curve.values,
+                    mode="lines+markers",
+                    line=dict(color=line_color, width=2, shape="hv"),
+                    marker=dict(size=4),
+                    name="계좌 잔고 (USDT)",
+                    hovertemplate="시각: %{x}<br>잔고: $%{y:,.2f}<extra></extra>"
+                )
             )
-        with col_btn:
-            csv_bytes = trades_df.to_csv(index=False).encode("utf-8-sig")
-            st.download_button(
-                label="📥 Trade Log CSV 다운로드",
-                data=csv_bytes,
-                file_name=f"trade_log_BTCUSDT_{selected_tf}_lev{leverage}x.csv",
-                mime="text/csv",
-                use_container_width=True
+            eq_fig.add_hline(y=init_cash, line_dash="dash", line_color="#9e9e9e", annotation_text="초기 자본금")
+            eq_fig.update_layout(
+                template="plotly_dark",
+                height=320,
+                margin=dict(l=20, r=20, t=30, b=20),
+                yaxis_title="USDT",
+                hovermode="x unified"
             )
+            st.plotly_chart(eq_fig, use_container_width=True)
+        else:
+            st.info("거래 내역이 없어 자산 증식 곡선을 표시할 수 없습니다.")
 
-        st.dataframe(display_log, use_container_width=True, height=400)
-    else:
-        st.warning("현재 설정된 파라미터 조건에서는 매매 진입 내역이 발생하지 않았습니다. RSI 기준값 등을 조정해 보세요.")
+        st.markdown("---")
+
+        # ==========================================================================
+        # 5. 하단 상세 매매 기록 (Trade Log 테이블 및 CSV 다운로드 버튼)
+        # ==========================================================================
+        st.subheader("📋 상세 매매 기록 (Trade Log)")
+
+        if len(trades_df) > 0:
+            display_log = trades_df.rename(columns={
+                "trade_id": "거래번호",
+                "entry_timestamp": "진입 시각 (Entry Time)",
+                "exit_timestamp": "청산 시각 (Exit Time)",
+                "direction": "포지션",
+                "entry_price": "진입가 (USDT)",
+                "exit_price": "청산가 (USDT)",
+                "gross_return_pct": "수수료전 수익률 (%)",
+                "fee_paid": "지불 수수료 (USDT)",
+                "net_return_pct": "최종 수익률 (%)",
+                "net_pnl": "실현 손익금 (USDT)",
+                "cumulative_equity": "누적 잔고 (USDT)",
+                "exit_reason": "청산 사유",
+                "status": "상태"
+            })
+
+            col_info, col_btn = st.columns([3, 1])
+            with col_info:
+                st.markdown(
+                    f"총 **{len(trades_df):,}건**의 매매가 기록되었습니다. "
+                    f"(전체 테스트 구간: `{df.index[0]}` ~ `{df.index[-1]}`)"
+                )
+            with col_btn:
+                csv_bytes = trades_df.to_csv(index=False).encode("utf-8-sig")
+                st.download_button(
+                    label="📥 Trade Log CSV 다운로드",
+                    data=csv_bytes,
+                    file_name=f"trade_log_BTCUSDT_{selected_tf}_lev{leverage}x.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+
+            st.dataframe(display_log, use_container_width=True, height=400)
+        else:
+            st.warning("현재 설정된 파라미터 조건에서는 매매 진입 내역이 발생하지 않았습니다. RSI 기준값 등을 조정해 보세요.")
+
+    with tab2:
+        st.subheader("🏁 3대 유튜브 매매 전략 한눈에 비교 (Benchmark)")
+        any_df = results[selected_strategy]["data"]
+        st.caption(
+            f"**동일 조건 비교** — 타임프레임 `{selected_tf.upper()}` | 기간 `{any_df.index[0]}` ~ `{any_df.index[-1]}` | "
+            f"초기 자본금 `${init_cash:,.0f}` | 수수료 `{fee_pct:.2f}%` | 레버리지 `{leverage}x` | SL/TP: {risk_desc}"
+        )
+
+        bench_df = build_benchmark_table(results)
+
+        # 최우수 전략 요약 카드
+        traded = bench_df[bench_df["거래횟수"] > 0]
+        if len(traded) > 0:
+            b1, b2, b3 = st.columns(3)
+            b1.metric("🏆 최고 총수익률", traded["총수익률(%)"].idxmax().split(":")[0], f"{traded['총수익률(%)'].max():+.2f}%")
+            b2.metric("📐 최고 샤프지수", traded["샤프지수"].idxmax().split(":")[0], f"{traded['샤프지수'].max():.2f}")
+            b3.metric("🛡️ 최소 MDD", traded["MDD(%)"].idxmax().split(":")[0], f"{traded['MDD(%)'].max():.2f}%")
+
+        show_df = bench_df.copy()
+        show_df["프로핏팩터"] = show_df["프로핏팩터"].apply(lambda v: "∞" if np.isinf(v) else f"{v:.2f}")
+        st.dataframe(
+            show_df,
+            use_container_width=True,
+            column_config={
+                "총수익률(%)": st.column_config.NumberColumn(format="%.2f%%"),
+                "순손익($)": st.column_config.NumberColumn(format="$%.2f"),
+                "승률(%)": st.column_config.NumberColumn(format="%.2f%%"),
+                "MDD(%)": st.column_config.NumberColumn(format="%.2f%%"),
+                "총수수료($)": st.column_config.NumberColumn(format="$%.2f"),
+                "샤프지수": st.column_config.NumberColumn(format="%.2f"),
+                "거래횟수": st.column_config.NumberColumn(format="%d"),
+            }
+        )
+        st.download_button(
+            label="📥 벤치마크 비교표 CSV 다운로드",
+            data=bench_df.to_csv().encode("utf-8-sig"),
+            file_name=f"benchmark_BTCUSDT_{selected_tf}.csv",
+            mime="text/csv"
+        )
+        st.caption(
+            "※ 샤프지수: 실현 잔고 곡선의 봉 단위 수익률 기준 연환산(1h: √8,760, 4h: √2,190, 무위험수익률 0). "
+            "SL/TP/시그널 청산: 손절·익절·전략 청산 시그널로 청산된 거래 수."
+        )
+
+        # 전략별 누적 수익률 곡선 비교
+        st.subheader("📈 전략별 누적 수익률(%) 곡선 비교")
+        cmp_fig = go.Figure()
+        for key, res in results.items():
+            eq = res["equity_curve"]
+            cmp_fig.add_trace(
+                go.Scatter(
+                    x=eq.index,
+                    y=(eq.values / init_cash - 1.0) * 100.0,
+                    mode="lines",
+                    line=dict(shape="hv", width=2),
+                    name=STRATEGY_LABELS[key]
+                )
+            )
+        cmp_fig.add_hline(y=0, line_dash="dash", line_color="#9e9e9e")
+        cmp_fig.update_layout(
+            template="plotly_dark", height=420, hovermode="x unified",
+            yaxis_title="누적 수익률 (%)", margin=dict(l=20, r=20, t=30, b=20),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+        st.plotly_chart(cmp_fig, use_container_width=True)
 
 except Exception as e:
     st.error(f"⚠️ 데이터를 불러오거나 백테스팅을 실행하는 중 오류가 발생했습니다: {e}")
